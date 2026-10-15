@@ -298,8 +298,11 @@ final class DriverManager {
             }
             byte[] table=new byte[(int)strsz]; b.position((int)strings); b.get(table);
             String names=new String(table,StandardCharsets.ISO_8859_1);
-            if (!names.contains("\0vk_icdGetInstanceProcAddr\0") && !(android && names.contains("\0vkGetInstanceProcAddr\0")))
-                return "is not a Vulkan driver (it has no vk_icdGetInstanceProcAddr)";
+            // Bionic: also an Android Vulkan HAL module (adrenotools packs exporting only "HMI").
+            if (!names.contains("\0vk_icdGetInstanceProcAddr\0")
+                    && !(android && (names.contains("\0vkGetInstanceProcAddr\0") || names.contains("\0HMI\0"))))
+                return android ? "is not a Vulkan driver (it exports none of vk_icdGetInstanceProcAddr, vkGetInstanceProcAddr and HMI)"
+                               : "is not a Vulkan driver (it has no vk_icdGetInstanceProcAddr)";
             if (android) return null; // its other libraries are the phone's own
             List<String> missing=new ArrayList<>();
             for (String lib:libs)

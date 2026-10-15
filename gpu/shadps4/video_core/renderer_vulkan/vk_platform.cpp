@@ -165,6 +165,11 @@ static auto GetLayerExtensions(std::vector<const char*>&& extensions,
 
 std::vector<const char*> GetInstanceExtensions(Frontend::WindowSystemType window_type,
                                                bool enable_debug_utils) {
+    // bbport: a directly loaded driver (ICD or Android HAL) may not export every global entry point.
+    if (!VULKAN_HPP_DEFAULT_DISPATCHER.vkEnumerateInstanceExtensionProperties) {
+        LOG_ERROR(Render_Vulkan, "The Vulkan driver has no vkEnumerateInstanceExtensionProperties");
+        return {};
+    }
     const auto [properties_result, properties] = vk::enumerateInstanceExtensionProperties();
     if (properties_result != vk::Result::eSuccess || properties.empty()) {
         LOG_ERROR(Render_Vulkan, "Failed to query extension properties: {}",
@@ -232,6 +237,13 @@ std::vector<const char*> GetInstanceExtensions(Frontend::WindowSystemType window
 }
 
 std::vector<const char*> GetInstanceLayers(bool enable_validation, bool enable_crash_diagnostic) {
+    // bbport: no layer enumeration (a directly loaded driver without the loader's) means no layers.
+    if (!VULKAN_HPP_DEFAULT_DISPATCHER.vkEnumerateInstanceLayerProperties) {
+        if (enable_validation || enable_crash_diagnostic) {
+            LOG_ERROR(Render_Vulkan, "The Vulkan driver cannot enumerate layers; none are enabled");
+        }
+        return {};
+    }
     const auto [properties_result, properties] = vk::enumerateInstanceLayerProperties();
     if (properties_result != vk::Result::eSuccess || properties.empty()) {
         LOG_ERROR(Render_Vulkan, "Failed to query layer properties: {}",
@@ -286,10 +298,19 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
     ASSERT_MSG(get_instance_proc_addr, "No Vulkan driver (see BB_VULKAN_DRIVER)");
     VULKAN_HPP_DEFAULT_DISPATCHER.init(get_instance_proc_addr);
 
+    // bbport: a driver without vkEnumerateInstanceVersion (an Android HAL, whose loader answers it
+    // in the platform) cannot report an instance version: ask for the target one and let the
+    // physical device's apiVersion check in vk_instance.cpp decide.
+    if (!VULKAN_HPP_DEFAULT_DISPATCHER.vkEnumerateInstanceVersion) {
+        LOG_WARNING(Render_Vulkan,
+                    "The Vulkan driver has no vkEnumerateInstanceVersion; assuming {}.{}",
+                    VK_VERSION_MAJOR(TargetVulkanApiVersion),
+                    VK_VERSION_MINOR(TargetVulkanApiVersion));
+    }
     const auto [available_version_result, available_version] =
         VULKAN_HPP_DEFAULT_DISPATCHER.vkEnumerateInstanceVersion
             ? vk::enumerateInstanceVersion()
-            : vk::ResultValue(vk::Result::eSuccess, VK_API_VERSION_1_0);
+            : vk::ResultValue<u32>(vk::Result::eSuccess, u32{TargetVulkanApiVersion});
     ASSERT_MSG(available_version_result == vk::Result::eSuccess,
                "Failed to query Vulkan API version: {}", vk::to_string(available_version_result));
     ASSERT_MSG(available_version >= TargetVulkanApiVersion,
