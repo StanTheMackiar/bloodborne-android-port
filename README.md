@@ -22,7 +22,7 @@ Port of Bloodborne (PS4, **v1.09**, every retail release). The runtime and rende
 
 ## How it works
 
-This is a port, not an emulator. No PS4 hardware, firmware or operating system is emulated, and no PS4 BIOS is needed. It works like Wine + DXVK for one game: the game's own `eboot.bin` runs in an Android app process, its calls to PS4 system libraries land in native replacements, and its graphics are translated to Vulkan. Because the PS4 has an x86-64 CPU and the phone an ARM64 one, the game's machine code needs one more layer.
+This is a port, not an emulator. No PS4 hardware, firmware or operating system is emulated, and no PS4 BIOS is needed. It works like Wine + DXVK for one game: the game's own `eboot.bin` runs in an Android app process, its calls to PS4 system libraries land in native replacements, and its graphics are translated to Vulkan. The game runs as a plain Android (NDK) process: no Linux system, X server or Python is installed on the phone. Because the PS4 has an x86-64 CPU and the phone an ARM64 one, the game's machine code needs one more layer.
 
 **Translated while the game runs:**
 
@@ -35,9 +35,9 @@ This is a port, not an emulator. No PS4 hardware, firmware or operating system i
 **Native ARM64 code, no translation:**
 
 - **Runtime**: replaces the PS4 system libraries the game imports: threads, mutexes, semaphores, memory, time, files, save data, controller input, audio with ATRAC9 decoding, video output, movie playback. A call from the game goes straight to this code.
-- **Renderer**: based on [shadPS4](https://github.com/shadps4-emu/shadPS4)'s, through the [bloodborne_pc](https://github.com/deadinside28/bloodborne_pc) Linux port: command processing, texture and buffer caches, FSR 3.1, Lossless Scaling frame generation.
-- **Vulkan driver**: Mesa Turnip, shipped in the APK.
-- **The Android app**: menu, on-screen controller, Steam sign-in.
+- **Renderer**: based on [shadPS4](https://github.com/shadps4-emu/shadPS4)'s, through the [bloodborne_pc](https://github.com/deadinside28/bloodborne_pc) Linux port: command processing, texture and buffer caches, FSR 3.1.
+- **Vulkan driver**: the phone's own driver, or a Mesa Turnip for Android build you add from the app's **GPU driver** menu.
+- **The Android app**: menu, on-screen controller, mods and PKG installers.
 
 FEXCore runs in its fastest mode (no x86 memory-ordering emulation, reduced x87 precision). The PC build has no translation layer at all: there, the game's x86-64 code runs directly on the CPU.
 
@@ -48,15 +48,14 @@ FEXCore runs in its fastest mode (no x86 memory-ordering emulation, reduced x87 
 - **Mods**: install .zip, .7z or PS4 .pkg mods for 1.09, switch them on and off and set their load order
 - **Cheats**: infinite health and infinite blood vials/items, switched on and off while you play
 - **Game settings** in the app's menu: skip the online/offline screen (straight to the main menu), skip intros, free camera, debug menu
-- **Lossless Scaling frame generation** (2×, 3×, 4×). Sign in with Steam in the app and it downloads `Lossless.dll` from your own copy of Lossless Scaling
-- **FSR 3.1** upscaling and **FSR 3.1 frame generation**. FSR 3.1 frame generation has poor image quality for now; try Lossless Scaling frame generation instead
+- **FSR 3.1** upscaling and **FSR 3.1 frame generation** (poor image quality for now). Lossless Scaling frame generation is paused: it was built for the former Linux runtime and comes back once it is ported to the Android one
 - **On-screen PlayStation controller** with an editable layout; physical controllers work too
-- **Two Vulkan drivers in one APK**, picked automatically for your GPU; newer Turnip builds download from the **GPU driver** menu
+- **GPU driver menu**: the phone's own Vulkan driver, or a Turnip for Android build downloaded from this project's releases (or any adrenotools-style zip)
 - 16:9 picture on any screen, including foldables
 
 ## Devices
 
-| Tested | SoC | GPU | Driver |
+| Tested | SoC | GPU | Turnip build |
 |---|---|---|---|
 | AYN Thor | Snapdragon 8 Gen 2 | Adreno 740 | Mesa main |
 | Oppo Find N5 | Snapdragon 8 Elite | Adreno 830 | Mesa turnip/gen8 |
@@ -90,7 +89,7 @@ On ColorOS / OxygenOS (Oppo, OnePlus) a "Security warning" about a malicious app
 Swipe in from the left edge (or press Back) to open the menu. Its sections:
 
 - **Game:** resume, Game settings, Cheats, Mods, restart.
-- **Graphics:** graphics settings (upscaler, render size, FPS limit, model detail, effects), Lossless Scaling and the GPU driver.
+- **Graphics:** graphics settings (upscaler, render size, FPS limit, model detail, effects) and the GPU driver.
 - **Controls:** turn the on-screen controller on or off; edit its layout (move, resize or reset the buttons). With the controller on, drag anywhere outside the buttons to turn the camera.
 - **Storage:** choose the game folder, quit.
 - **App:** check for updates (installing one closes the game, so save first).
@@ -99,9 +98,9 @@ Each entry shows its current setting underneath.
 
 ## Default settings and performance
 
-The defaults are tuned on the AYN Thor: a 752×424 scene upscaled by FSR 3.1 to 1280×720, the costly effects (SSAO, SSR, dynamic shadows, depth of field, motion blur, the game's anti-aliasing) off, **lowest model detail** and a 60 FPS limit. Lossless Scaling and cheats start off. They apply on a first install and once when updating from 0.7.x or older; your controller mapping, GPU driver and mods choice are kept.
+The defaults are tuned on the AYN Thor: a 752×424 scene upscaled by FSR 3.1 to 1280×720, the costly effects (SSAO, SSR, dynamic shadows, depth of field, motion blur, the game's anti-aliasing) off, **lowest model detail** and a 60 FPS limit. Cheats start off. They apply on a first install and once when updating from 0.7.x or older; your controller mapping, GPU driver and mods choice are kept.
 
-On the Thor most of the GPU's time goes to geometry, not pixels: a smaller render size barely changes the frame rate, the model detail setting does (lowest: about +10%). Lossless Scaling 2× costs little GPU time and doubles the frames shown.
+On the Thor most of the GPU's time goes to geometry, not pixels: a smaller render size barely changes the frame rate, the model detail setting does (lowest: about +10%).
 
 ## Game settings and cheats
 
@@ -116,39 +115,22 @@ They are code hooks in the 1.09 executable (the same places as Shiningami's Gold
 
 ## Lossless Scaling frame generation
 
-[Lossless Scaling](https://store.steampowered.com/app/993090/Lossless_Scaling/) generates extra frames between the game's own, so the picture moves more smoothly. The app runs it through [lsfg-vk](https://github.com/PancakeTAS/lsfg-vk) 1.0, adapted for the Turnip driver. Lossless Scaling itself is not included: it needs your own copy, bought on Steam.
-
-1. Open the menu → **Get Lossless.dll from Steam**.
-2. Scan the QR code with the Steam app on your phone (Steam Guard → scan QR code), or choose **Sign in with password instead** and enter your Steam Guard code.
-3. The app checks that your account owns Lossless Scaling and downloads only `Lossless.dll` (about 7 MB).
-4. Open **Lossless Scaling** in the menu and pick 2×, 3× or 4×. Lower flow scale and performance mode are faster. Changes apply while you play.
-
-The sign-in is used once, for that download. The app keeps no password and no sign-in token; the file is saved in the app's own storage. You can also copy `Lossless.dll` from a PC (`steamapps/common/Lossless Scaling/Lossless.dll`) next to your game folder, e.g. `/sdcard/Bloodborne/Lossless.dll` beside `/sdcard/Bloodborne/CUSA03173`.
-
-Tips:
-
-- Frames are smoothest when the screen refresh rate is the FPS limit × the multiplier. The app sets the screen to that rate when it can: 30 FPS × 2 → 60 Hz, 30 × 4, 40 × 3 or 60 × 2 → 120 Hz.
-- It works with any upscaler and replaces FSR 3.1 frame generation. It sees only finished frames, without the game's motion vectors, so fast motion and the HUD can show artifacts.
-- Technical details: [docs/ANDROID_LSFG.md](docs/ANDROID_LSFG.md).
+Paused. It ran through lsfg-vk inside the former Linux runtime (see [docs/ANDROID_LSFG.md](docs/ANDROID_LSFG.md)); the app no longer has the Lossless Scaling and Steam sign-in menus. It comes back once the layer is ported to the Android runtime.
 
 ## Build
 
 ```bash
 git clone --recursive https://github.com/ducvd89/Bloodborne-Android.git
 cd Bloodborne-Android
-bash tools/android/build_turnip.sh main
-bash tools/android/build_turnip.sh gen8
-bash tools/android/build_arm64.sh
-bash tools/android/build_lsfg.sh
-bash tools/android/fetch_steam_libs.sh
-python3 tools/android/build_arm64_bundle.py --device-libs <rootfs library list>
-bash tools/android/build_release_apk.sh
+bash tools/android/build_bionic_deps.sh      # once: the NDK and the native libraries
+bash tools/android/build_bionic.sh           # the game process, bb-prepare, ps4-pkg-tool
+bash tools/android/build_release_apk.sh      # the runtime archive and the APK
 ```
 
-Build inputs (SDK, rootfs, signing key, game icon) are listed in [docs/ANDROID_RELEASE_0_1.md](docs/ANDROID_RELEASE_0_1.md). The Linux PC build is documented in [README.linux.md](README.linux.md).
+Build inputs (SDK, signing key, game icon) and the app's layout are in [docs/ANDROID_THOR.md](docs/ANDROID_THOR.md). Turnip for Android builds: `tools/android/build_turnip_android.sh` and `release_turnip_android.py`. The Linux PC build is documented in [README.linux.md](README.linux.md).
 
 ## Credits
 
-[bloodborne_pc](https://github.com/deadinside28/bloodborne_pc) (Linux port), [shadPS4](https://github.com/shadps4-emu/shadPS4), [ARM_bloodborne_pc](https://github.com/MaSieS4Fun/ARM_bloodborne_pc), [FEX](https://github.com/FEX-Emu/FEX), [fexdroid](https://github.com/cobrabm12/fexdroid), [Mesa](https://gitlab.freedesktop.org/mesa/mesa), [mesa-unified turnip/gen8](https://github.com/whitebelyash/mesa-unified), [FSR-Vulkan](https://github.com/FireBurn/FSR-Vulkan), [lsfg-vk](https://github.com/PancakeTAS/lsfg-vk), [GoldHEN cheats](https://github.com/GoldHEN/GoldHEN_Cheat_Repository) (Shiningami), [JavaSteam](https://github.com/Longi94/JavaSteam), and [GameNative](https://github.com/utkarshdalal/GameNative) for showing LSFG on Android.
+[bloodborne_pc](https://github.com/deadinside28/bloodborne_pc) (Linux port), [shadPS4](https://github.com/shadps4-emu/shadPS4), [ARM_bloodborne_pc](https://github.com/MaSieS4Fun/ARM_bloodborne_pc), [FEX](https://github.com/FEX-Emu/FEX), [fexdroid](https://github.com/cobrabm12/fexdroid), [Mesa](https://gitlab.freedesktop.org/mesa/mesa), [mesa-unified turnip/gen8](https://github.com/whitebelyash/mesa-unified), [FSR-Vulkan](https://github.com/FireBurn/FSR-Vulkan), [lsfg-vk](https://github.com/PancakeTAS/lsfg-vk) and [GameNative](https://github.com/utkarshdalal/GameNative) (for LSFG on Android, paused), and [GoldHEN cheats](https://github.com/GoldHEN/GoldHEN_Cheat_Repository) (Shiningami).
 
 Licensed under [GPL-2.0](LICENSE); third-party notices in [THIRD_PARTY_LICENSES.txt](tools/android/frontend/THIRD_PARTY_LICENSES.txt). Not affiliated with Sony Interactive Entertainment, FromSoftware, Valve or the developers of Lossless Scaling.

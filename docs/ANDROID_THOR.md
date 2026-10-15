@@ -1,4 +1,83 @@
-# AYN Thor Linux boot experiment
+# Bloodborne for Android: the Bionic-only app
+
+The game runs as a plain Android (NDK, Bionic) process started by the app. There is no Linux
+system on the phone any more: no Debian rootfs, no glibc, no X server, no Python, no Mesa in the
+APK. The sections below the line "Historical notes" describe the earlier fexdroid/Linux prototype
+and are kept only as a record; the tools they name (`build_arm64.sh`, `build_thor_bundle.py`,
+`deploy_thor.sh`, `launch_thor.sh`, `run-thor.sh`, ...) were removed.
+
+## Layout on the device
+
+The APK (about 17 MB) holds the Java app, `libbbpresent.so` (the game's frame path) and the runtime
+archive as an asset. At the first start `RuntimeInstaller` unpacks it into the app's files directory
+`/data/data/com.ducvd89.bloodborne/files/`:
+
+```
+bbport/bionic/bin/    bb-probe (the game process)  bb-prepare (game preparation)
+                      kgsl-chip-id (GPU family)    ps4-pkg-tool (PKG installs)
+bbport/bionic/lib/    libbbgpu.so  libbbcpu.so (FEXCore)  libc++_shared.so
+bbport/patch-parts/   the settings' game patches (effects, model detail, resolutions, cheats, ...)
+bbport/run-bionic.sh  the launch script (Android's own sh; toybox tools only)
+bbport/fex-compatible.json, bbport/bbport.default.ini, bbport/licenses/
+bbport/data, logs, user   created empty; user/ holds the saves
+drivers/<name>/       GPU drivers the player installed (adrenotools-style zips: driver.lib names the library)
+home/bbport/          FEXCore's config and cache
+```
+
+Not in the archive and never touched by updates: `bbport/user` (saves), `bbport/bbport.ini` (settings),
+`bbport/mods.json`, the game and mods folders (shared storage), `drivers/`.
+
+Start of a game (`MainActivity.startGame`): the app builds the mods overlay (`ModManager`, Java) and runs
+`/system/bin/sh bbport/run-bionic.sh game` with `BB_GAME_DIR` (the chosen game folder), `BB_APP0_DIR` (the overlay, or
+the game folder without mods) and `BB_SCREEN_W/H`. The script reads `bbport.ini`, runs `bb-prepare GAME DATA`
+(builds `data/boot-linked.bin` and `content.bin` once per game version), picks the patch files, the GPU driver
+(`gpu_driver`: `system` for the phone's own, else `drivers/<name>/driver.lib`) and execs `bb-probe`. Frames go to
+`BbPresent` over `bbpresent.sock`, sound to `audio.fifo` (`AudioBridge`), pad state to `android-pad.state`
+(`PadBridge`).
+
+## Updating from the Linux runtime
+
+`RuntimeInstaller.ensure` runs when the runtime archive's SHA-256 differs from `.runtime.sha256` (or a key file is
+missing). After checking the archive it calls `RuntimeCleanup.run`, which deletes the former runtime: `files/rootfs`,
+`bbport/arm64` (the glibc bundle; the patch files now live in `bbport/patch-parts`), `bbport/scripts`,
+`bbport/rootfs`, `bbport/bin`, `bbport/lib`, `run-thor.sh`, `run-common.sh`, `mods.sh`,
+`thor-gamecontrollerdb.txt`, `lsfg-vk.toml`, `drivers/.catalog.json` and the glibc GPU drivers (folders in
+`drivers/` with an `icd.json` and no `driver.lib`). It never follows a symbolic link (the old rootfs has absolute
+ones that point out of the app), skips a path whose parent resolves outside `files/`, and refuses to delete the paths
+listed above as kept. Then it replaces `bbport/bionic` and `bbport/patch-parts` and unpacks the archive. A failed
+cleanup is logged and retried at the next start. `bbport/Lossless.dll`, if the Steam sign-in had saved one, is left
+in place. `tests/android-mods/run.sh` tests the cleanup (links, saves, drivers).
+
+## Build
+
+Prerequisites (once): `tools/android/build_bionic_deps.sh` (NDK 29 and the third-party libraries), Android SDK
+platform 35 and build-tools 35.0.0, a JDK, Python with Pillow, `out/eboot.elf` (the 1.09 executable the patch files are
+compiled from; never packaged), the user-owned game icon `game/CUSA03173/sce_sys/icon0.dds` for the launcher icon.
+
+```bash
+tools/android/build_bionic.sh        # out/bionic/{bin,lib}: bb-probe, bb-prepare, kgsl-chip-id, ps4-pkg-tool, libs
+tools/android/check_bionic_symbols.sh  # (build_bionic.sh runs it) NEEDED libraries and unresolved symbols
+tools/android/build_release_apk.sh   # out/release/runtime.tar.gz (+ .sha256) and the signed APK
+BB_APK_NAME=Bloodborne-bionic-test-<sha> tools/android/build_release_apk.sh   # another file name
+```
+
+`build_release_runtime.py` stages the stripped programs and libraries, compiles the patch files with
+`build_patch_parts.py`, writes the archive and refuses it when it holds a symbolic link that leaves the tree, a device
+file, or a game-derived or Linux-runtime file. `build_frontend.sh` compiles the app with `javac --release 8`, builds
+`libbbpresent.so` with the NDK, dexes the mod libraries (`fetch_mod_libs.sh`: Commons Compress and xz) and signs with
+a local development key under `.local-deps/`. Tests: `tests/android-mods/run.sh`, `tests/test_prepare_native.py`
+(`tools/android/prepare_game.py` and `mods_android.py` stay as the reference the native and Java ports are
+compared with; they are not shipped).
+
+Turnip for Android builds (not part of the APK): `build_turnip_android.sh`, `release_turnip_android.py`. The glibc
+Turnip and Lossless Scaling build tools (`build_turnip.sh`, `release_turnip.py`, `mesa-patches/`, `build_lsfg.sh`,
+`lsfg-patches/`) are kept for reference; the app no longer uses them.
+
+---
+
+# Historical notes: the fexdroid / Linux prototype
+
+## AYN Thor Linux boot experiment
 
 These are historical development notes for the manual fexdroid-based prototype.
 For the self-contained `com.ducvd89.bloodborne` APK, use
