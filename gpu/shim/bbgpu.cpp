@@ -21,7 +21,9 @@
 #include <chrono>
 #include <thread>
 #include <vector>
+#ifndef __ANDROID__
 #include <SDL3/SDL.h>
+#endif
 #include "../bbgpu.h"
 #include "common/elf_info.h"
 #include "common/logging/log.h"
@@ -284,7 +286,7 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
         }
         g_window_cv.notify_all();
         while (window->PollEvents()) {
-            SDL_Delay(2);
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
         LOG_INFO(Frontend, "Window closed by user");
         std::fflush(stdout);

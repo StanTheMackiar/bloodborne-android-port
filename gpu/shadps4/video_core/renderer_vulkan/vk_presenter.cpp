@@ -690,6 +690,11 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     {
         const vk::Extent2D extent = swapchain.GetExtent();
         SetExpectedGameSize(s32(extent.width), s32(extent.height));
+        // The image's layout and owner when it goes to the display: ePresentSrcKHR for a swapchain;
+        // for an AHardwareBuffer (Bionic) general, released to the foreign queue family.
+        const auto acquire_queues = swapchain.AcquireQueues();
+        const auto release_queues = swapchain.ReleaseQueues();
+        const vk::ImageLayout present_layout = swapchain.PresentLayout();
         const vk::ImageSubresourceRange color_range{
             .aspectMask = vk::ImageAspectFlagBits::eColor,
             .baseMipLevel = 0,
@@ -703,8 +708,8 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                 .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
                 .oldLayout = vk::ImageLayout::eUndefined,
                 .newLayout = vk::ImageLayout::eTransferDstOptimal,
-                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .srcQueueFamilyIndex = acquire_queues.first,
+                .dstQueueFamilyIndex = acquire_queues.second,
                 .image = swapchain_image,
                 .subresourceRange = color_range,
             },
@@ -744,10 +749,9 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                                                vk::AccessFlagBits::eColorAttachmentWrite
                                          : vk::AccessFlagBits::eNone,
                 .oldLayout = vk::ImageLayout::eTransferDstOptimal,
-                .newLayout = overlay ? vk::ImageLayout::eColorAttachmentOptimal
-                                     : vk::ImageLayout::ePresentSrcKHR,
-                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .newLayout = overlay ? vk::ImageLayout::eColorAttachmentOptimal : present_layout,
+                .srcQueueFamilyIndex = overlay ? VK_QUEUE_FAMILY_IGNORED : release_queues.first,
+                .dstQueueFamilyIndex = overlay ? VK_QUEUE_FAMILY_IGNORED : release_queues.second,
                 .image = swapchain_image,
                 .subresourceRange = color_range,
             },
@@ -771,9 +775,9 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                 .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
                 .dstAccessMask = vk::AccessFlagBits::eNone,
                 .oldLayout = vk::ImageLayout::eColorAttachmentOptimal,
-                .newLayout = vk::ImageLayout::ePresentSrcKHR,
-                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .newLayout = present_layout,
+                .srcQueueFamilyIndex = release_queues.first,
+                .dstQueueFamilyIndex = release_queues.second,
                 .image = swapchain_image,
                 .subresourceRange = color_range,
             };
@@ -794,7 +798,9 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         draw_scheduler.WaitSubmitted(frame->ready_tick);
     }
     SubmitInfo info{};
-    info.AddWait(swapchain.GetImageAcquiredSemaphore());
+    if (const vk::Semaphore acquired = swapchain.GetImageAcquiredSemaphore()) { // none: nothing to wait for
+        info.AddWait(acquired);
+    }
     info.AddWait(frame->ready_semaphore, frame->ready_tick);
     info.AddSignal(swapchain.GetPresentReadySemaphore());
     info.AddSignal(frame->present_done);
@@ -803,7 +809,13 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     // waits there for the present-ready semaphore of that submission. Sent by a recording thread
     // (BB_ASYNC_SUBMIT), it needs submit_mutex, held below for the present: a deadlock unless
     // it is in the queue first.
+    // bbport: so does the AHB swapchain (Bionic): the sync file of the present-ready semaphore can only
+    // be exported once its signal is submitted.
+#ifdef __ANDROID__
+    static const bool present_layer = true;
+#else
     static const bool present_layer = std::getenv("BB_LSFG") != nullptr;
+#endif
     PresentTrace("flushed");
     if (present_layer) {
         scheduler.WaitSubmitted(scheduler.CurrentTick() - 1);
