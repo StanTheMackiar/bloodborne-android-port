@@ -24,11 +24,19 @@ constexpr u64 AhbUsage = AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT |
                          AHARDWAREBUFFER_USAGE_COMPOSER_OVERLAY;
 
 /// BB_PRESENT_BUFFERS: the number of buffers (3 by default: one shown, one pending, one rendered).
+/// With Lossless Scaling frame generation (BB_LSFG_MULTIPLIER 2-4) a cycle holds one buffer per
+/// frame it shows (the multiplier) while the app still has the last ones: multiplier + 3.
 u32 BufferCount() {
     if (const char* value = std::getenv("BB_PRESENT_BUFFERS")) {
         const long count = std::strtol(value, nullptr, 10);
         if (count >= 2 && count <= static_cast<long>(8)) {
             return static_cast<u32>(count);
+        }
+    }
+    if (const char* value = std::getenv("BB_LSFG_MULTIPLIER")) {
+        const long multiplier = std::strtol(value, nullptr, 10);
+        if (multiplier >= 2 && multiplier <= 4) {
+            return static_cast<u32>(multiplier + 3);
         }
     }
     return 3;
@@ -128,7 +136,6 @@ void Swapchain::Create(u32 width_, u32 height_) {
         }
     }
     image_index = 0;
-    acquire_imported = false;
     LOG_INFO(Render_Vulkan, "AHB swapchain: {} buffers {}x{} (generation {}, {})", image_count, width,
              height, generation, client.Connected() ? "app connected" : "no app");
 }
@@ -339,8 +346,8 @@ bool Swapchain::AcquireNextImage() {
 }
 
 void Swapchain::ImportAcquire(u32 index) {
-    acquire_imported = false;
     Buffer& buffer = buffers[index];
+    buffer.acquire_imported = false;
     const int fd = buffer.release_fd;
     if (fd < 0) {
         return; // never shown, or released at once: nothing to wait for
@@ -355,7 +362,7 @@ void Swapchain::ImportAcquire(u32 index) {
         };
         const auto result = instance.GetDevice().importSemaphoreFdKHR(import_info);
         if (result == vk::Result::eSuccess) {
-            acquire_imported = true; // the driver owns the fd now
+            buffer.acquire_imported = true; // the driver owns the fd now
             return;
         }
         LOG_WARNING(Render_Vulkan,
@@ -408,7 +415,7 @@ bool Swapchain::Present() {
     if (fence_fd >= 0) {
         close(fence_fd);
     }
-    acquire_imported = false;
+    buffers[image_index].acquire_imported = false;
     return !needs_recreation;
 }
 

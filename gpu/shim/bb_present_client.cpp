@@ -35,7 +35,14 @@ bool Client::Configured() {
 
 bool Client::VsyncRequested() {
     const char* value = std::getenv("BB_VSYNC");
-    return value && std::strtol(value, nullptr, 10) != 0;
+    if (value && std::strtol(value, nullptr, 10) != 0) {
+        return true;
+    }
+    // Lossless Scaling frame generation (vk_lsfg.h) needs every frame shown for one refresh, in order,
+    // whatever the VSync setting says: the generated frames are only right that way.
+    const char* multiplier = std::getenv("BB_LSFG_MULTIPLIER");
+    const long frames = multiplier ? std::strtol(multiplier, nullptr, 10) : 0;
+    return frames >= 2 && frames <= 4;
 }
 
 bool Client::Connect(u32 width, u32 height, u32 format, u32 count) {

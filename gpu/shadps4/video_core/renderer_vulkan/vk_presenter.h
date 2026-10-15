@@ -12,6 +12,9 @@
 #include "video_core/renderer_vulkan/host_passes/fsr_pass.h"
 #include "video_core/renderer_vulkan/host_passes/pp_pass.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#ifdef __ANDROID__
+#include "video_core/renderer_vulkan/vk_lsfg.h"
+#endif
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
@@ -112,6 +115,30 @@ public:
     }
 
 private:
+    /// What a presentation submission blits into the swapchain image: a game frame (`frame`: waits
+    /// for its rendering, signals its present_done), or a generated frame (`external`: an
+    /// AHardwareBuffer image of the frame generation's device, taken over from the queue family
+    /// EXTERNAL; `wait` is complete when it is signaled, `done` is signaled when it was read).
+    struct PresentSource {
+        vk::Image image;
+        u32 width;
+        u32 height;
+        Frame* frame{};
+        bool external{};
+        vk::Semaphore wait{};
+        vk::Fence done{};
+    };
+    /// Acquires a swapchain buffer (it becomes the current one), records the blit of the source into
+    /// it plus the overlay and queues it; false when there is no buffer (the frame is skipped).
+    bool SubmitToSwapchain(const PresentSource& source);
+    /// Hands the current swapchain buffer to the app.
+    bool SendToApp();
+#ifdef __ANDROID__
+    /// Lossless Scaling frame generation for one real frame: queues it and its generated frames and
+    /// hands them to the app in order, spaced. False: not done (frame generation failed), present
+    /// the frame as usual.
+    bool PresentWithLsfg(Frame* frame);
+#endif
     Frame* GetRenderFrame();
 
     void RecreateFrame(Frame* frame, u32 width, u32 height);
@@ -137,6 +164,9 @@ private:
     Scheduler present_scheduler;
     Scheduler flip_scheduler;
     Swapchain swapchain;
+#ifdef __ANDROID__
+    std::unique_ptr<Lsfg> lsfg; ///< bbport: BB_LSFG_MULTIPLIER 2-4 (null: off, or it failed)
+#endif
     Runtime runtime;
     std::unique_ptr<Rasterizer> rasterizer;
     VideoCore::TextureCache& texture_cache;

@@ -26,8 +26,9 @@ public:
     /// renders into the buffers and nobody shows them (benchmarks, a missing app).
     static bool Configured();
 
-    /// True when BB_VSYNC=1 (bbport.ini vsync=1): the app is to show every frame for at least one
-    /// display refresh, in order (BB_PRESENT_FLAG_FIFO in HELLO), instead of the newest only.
+    /// True when BB_VSYNC=1 (bbport.ini vsync=1), or with Lossless Scaling frame generation
+    /// (BB_LSFG_MULTIPLIER 2-4): the app is to show every frame for at least one display refresh, in
+    /// order (BB_PRESENT_FLAG_FIFO in HELLO), instead of the newest only.
     static bool VsyncRequested();
 
     /// Connects to BB_PRESENT_SOCKET (retries for a while: the app may be a moment late), says HELLO

@@ -49,6 +49,14 @@ public:
     bool AcquireNextImage();
     /// Hands the current buffer to the app.
     bool Present();
+    /// bbport: Lossless Scaling frame generation (vk_lsfg.h) holds several buffers at once: it
+    /// acquires a buffer per frame of a cycle, renders into each and sends them one after the other.
+    /// The "current" buffer is the one Image(), ImageView() and the semaphores below are about, and the
+    /// one Present() sends; SelectImage() picks one of the acquired buffers again. A buffer set made
+    /// again meanwhile (Recreate) has a new Generation(): the held indices are void then.
+    u32 CurrentIndex() const { return image_index; }
+    void SelectImage(u32 index) { image_index = index; }
+    u32 Generation() const { return generation; }
 
     vk::Image Image() const { return buffers[image_index].image; }
     vk::ImageView ImageView() const { return buffers[image_index].view; }
@@ -62,7 +70,8 @@ public:
 
     /// The semaphore the frame's submission waits on; null when the buffer needs no wait.
     [[nodiscard]] vk::Semaphore GetImageAcquiredSemaphore() const {
-        return acquire_imported ? image_acquired[image_index] : vk::Semaphore{};
+        return !buffers.empty() && buffers[image_index].acquire_imported ? image_acquired[image_index]
+                                                                          : vk::Semaphore{};
     }
     [[nodiscard]] vk::Semaphore GetPresentReadySemaphore() const {
         return present_ready[image_index];
@@ -89,6 +98,7 @@ private:
         vk::DeviceMemory memory{};
         vk::ImageView view{};
         int release_fd{-1}; ///< the app's release fence of the last frame, until it is waited on
+        bool acquire_imported{false}; ///< release_fd was imported into image_acquired[index]
     };
 
     void Destroy();
@@ -114,7 +124,6 @@ private:
     u32 image_index = 0;
     u32 generation = 0;
     u64 frame_counter = 0;
-    bool acquire_imported = false;
     bool zero_extent = false;
     bool needs_recreation = true;
     bool sync_import_ok = true; ///< importing sync files as semaphores works (else poll them)
