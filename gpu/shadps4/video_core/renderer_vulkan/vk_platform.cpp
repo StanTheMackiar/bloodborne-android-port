@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 // Include the vulkan platform specific header
-#if defined(ANDROID)
+#if defined(ANDROID) || defined(__ANDROID__)
 #define VK_USE_PLATFORM_ANDROID_KHR
 #elif defined(_WIN64)
 #define VK_USE_PLATFORM_WIN32_KHR
@@ -13,6 +13,7 @@
 #define VK_USE_PLATFORM_XLIB_KHR
 #endif
 
+#include "vk_driver_loader.h"
 #include <vector>
 #include <fmt/ranges.h>
 
@@ -64,7 +65,19 @@ vk::SurfaceKHR CreateSurface(vk::Instance instance, const Frontend::WindowSDL& e
     const auto& window_info = emu_window.GetWindowInfo();
     vk::SurfaceKHR surface{};
 
-#if defined(VK_USE_PLATFORM_WIN32_KHR)
+#if defined(VK_USE_PLATFORM_ANDROID_KHR)
+    if (window_info.type == Frontend::WindowSystemType::Android) {
+        // bbport: render_surface is the ANativeWindow (TODO(phase2): provided by the app).
+        const vk::AndroidSurfaceCreateInfoKHR android_ci = {
+            .window = static_cast<ANativeWindow*>(window_info.render_surface),
+        };
+        if (instance.createAndroidSurfaceKHR(&android_ci, nullptr, &surface) !=
+            vk::Result::eSuccess) {
+            LOG_CRITICAL(Render_Vulkan, "Failed to initialize Android surface");
+            UNREACHABLE();
+        }
+    }
+#elif defined(VK_USE_PLATFORM_WIN32_KHR)
     if (window_info.type == Frontend::WindowSystemType::Windows) {
         const vk::Win32SurfaceCreateInfoKHR win32_ci = {
             .hinstance = nullptr,
@@ -172,7 +185,11 @@ std::vector<const char*> GetInstanceExtensions(Frontend::WindowSystemType window
     switch (window_type) {
     case Frontend::WindowSystemType::Headless:
         break;
-#if defined(VK_USE_PLATFORM_WIN32_KHR)
+#if defined(VK_USE_PLATFORM_ANDROID_KHR)
+    case Frontend::WindowSystemType::Android:
+        extensions.push_back(VK_KHR_ANDROID_SURFACE_EXTENSION_NAME);
+        break;
+#elif defined(VK_USE_PLATFORM_WIN32_KHR)
     case Frontend::WindowSystemType::Windows:
         extensions.push_back(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
         break;
@@ -271,9 +288,11 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
     setenv("VK_DRIVER_FILES", icd_path.c_str(), true);
 #endif
 
-    static vk::detail::DynamicLoader dl;
-    VULKAN_HPP_DEFAULT_DISPATCHER.init(
-        dl.getProcAddress<PFN_vkGetInstanceProcAddr>("vkGetInstanceProcAddr"));
+    // bbport: the driver comes from vk_driver_loader (system loader or BB_VULKAN_DRIVER).
+    const auto get_instance_proc_addr =
+        reinterpret_cast<PFN_vkGetInstanceProcAddr>(bb_vk_get_instance_proc_addr());
+    ASSERT_MSG(get_instance_proc_addr, "No Vulkan driver (see BB_VULKAN_DRIVER)");
+    VULKAN_HPP_DEFAULT_DISPATCHER.init(get_instance_proc_addr);
 
     const auto [available_version_result, available_version] =
         VULKAN_HPP_DEFAULT_DISPATCHER.vkEnumerateInstanceVersion

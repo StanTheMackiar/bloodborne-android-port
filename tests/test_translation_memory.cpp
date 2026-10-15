@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Exercise the production paged SPIR-V emitter and portable label writer on a real Vulkan GPU.
+#include "vk_driver_loader.h"
 #include <array>
 #include <cassert>
 #include <chrono>
@@ -21,9 +22,8 @@ int main(int argc, char** argv) {
     // The regression must exercise no AMD marker commands, including diagnostic breadcrumbs.
     setenv("BB_BREADCRUMBS","0",1);
     Instance instance(0, true);
-    static vk::detail::DynamicLoader loader;
     vk::detail::DispatchLoaderDynamic d;
-    d.init(loader.getProcAddress<PFN_vkGetInstanceProcAddr>("vkGetInstanceProcAddr"));
+    d.init(reinterpret_cast<PFN_vkGetInstanceProcAddr>(bb_vk_get_instance_proc_addr()));
     d.init(instance.GetInstance()); d.init(instance.GetDevice());
     const auto device = instance.GetDevice();
     Scheduler scheduler(instance);
