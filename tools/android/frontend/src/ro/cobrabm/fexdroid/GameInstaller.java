@@ -13,24 +13,19 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.atomic.AtomicBoolean;
-import org.json.JSONObject;
 
-/** Installs the game from its PKG files (the runtime's install-game, one PKG per run): the base game
+/** Installs the game from its PKG files (PkgInstaller.installGame, one PKG per run): the base game
  *  first, then the 1.09 update into the same destination. Picks the PKG (a real path: multi-GB files are
  *  never copied), then asks where to install it (the tool makes the CUSAxxxxx folder inside), runs the tool
  *  under a progress dialog (bytes, rate, time left; Cancel destroys the process) and reports the result. When the game folder is ready the
  *  activity starts it. */
 final class GameInstaller {
-    /** The runtime tool's script (bbport/): install-game may move to its own script, change it here. */
-    static final String SCRIPT=ModsDialog.SCRIPT;
     static final int REQUEST_PKG=7, REQUEST_DEST=8;
     static final String DEFAULT_DEST="/storage/emulated/0/Bloodborne";
     /** A PKG whose path cannot be read is copied only when it is smaller than this. */
     static final long COPY_LIMIT=1L<<30;
 
     interface Host extends ModsDialog.Host {
-        /** The current game folder, or null. */
-        String gameDir();
         boolean gameRunning();
         /** Stops the running game; blocks (called off the UI thread). */
         void stopGame();
@@ -184,55 +179,46 @@ final class GameInstaller {
     private void run() {
         final File pkg=pending; final boolean temporary=pendingTemp; pending=null;
         busy=true; cancel.set(false);
-        // The first install on a new app also unpacks the app's runtime (host.scriptStream): some seconds.
+        // The first install on a new app also unpacks the app's runtime (host.pkgInstaller): some seconds.
         progress=new PkgProgressDialog(activity,"Install game","Preparing…",cancel);
         background(() -> {
-            JSONObject result=null; String failure=null; boolean cancelled=false;
+            PkgInstaller.GameResult result=null; String failure=null; boolean cancelled=false;
             try {
                 if (holdsGame()) { stopped=true; host.stopGame(); }
                 PkgProgress track=new PkgProgress();
-                String[] answer={null}; StringBuilder other=new StringBuilder();
-                boolean known=host.scriptStream(SCRIPT,line -> {
-                    line=line.trim();
+                PkgInstaller installer=host.pkgInstaller();
+                result=installer.installGame(pkg,new File(dest),false,(done,total,label) -> {
                     long now=SystemClock.elapsedRealtime();
-                    if (track.feed(line,now)) {
-                        String label=track.label, text=track.detail(now); int permille=track.permille();
-                        main.post(() -> { if (live() && !cancel.get()) progress.pkg(label,"Installing the game…",permille,text); });
-                    } else if (line.startsWith("{")) answer[0]=line;
-                    else if (!line.isEmpty() && other.length()<400) other.append(line).append('\n');
-                },cancel,"install-game","--dest",dest,"--pkg",pkg.getAbsolutePath());
-                if (!known) throw new IOException("Update the app's runtime to install from PKG");
+                    track.update(done,total,label,now);
+                    String what=track.label, text=track.detail(now); int permille=track.permille();
+                    main.post(() -> { if (live() && !cancel.get()) progress.pkg(what,"Installing the game…",permille,text); });
+                },cancel::get);
                 if (cancel.get()) throw new CancellationException();
-                if (answer[0]==null) {
-                    if (other.indexOf("usage:")>=0) throw new IOException("Update the app's runtime to install from PKG");
-                    throw new IOException("The PKG could not be installed"+(other.length()>0 ? ": "+other.toString().trim() : "."));
-                }
-                result=ModsDialog.json(answer[0]);
             } catch (CancellationException e) { cancelled=true;
             } catch (Exception e) {
                 failure=e.getMessage()!=null ? e.getMessage() : e.toString();
                 android.util.Log.e("Bloodborne","game install: "+e);
             } finally { if (temporary) pkg.delete(); }
-            JSONObject o=result; String problem=failure; boolean stop=cancelled;
+            PkgInstaller.GameResult o=result; String problem=failure; boolean stop=cancelled;
             main.post(() -> {
                 progress.dismiss(); busy=false;
                 if (!live()) return;
                 if (stop) { host.toast("Install cancelled."); end(); }
                 else if (problem!=null) alert("Not installed",problem,false);
-                else if (!o.optBoolean("ok")) alert("Not installed",o.isNull("problem") ? "The PKG could not be installed." : o.optString("problem"),false);
+                else if (!o.ok) alert("Not installed",o.problem==null ? "The PKG could not be installed." : o.problem,false);
                 else finished(o);
             });
         },"Game-install");
     }
 
-    private void finished(JSONObject o) {
-        String where=o.optString("gameDir");
-        if (o.optBoolean("ready") && !where.isEmpty()) {
+    private void finished(PkgInstaller.GameResult o) {
+        String where=o.gameDir==null ? "" : o.gameDir;
+        if (o.ready && !where.isEmpty()) {
             closed=true; host.useGame(new File(where)); return;
         }
-        // Not ready: install-game found an older version (the base game, or an update before 1.09).
-        String title=o.isNull("titleId") ? "" : o.optString("titleId");
-        String version=o.isNull("appVer") ? "" : o.optString("appVer").replaceFirst("^0(?=\\d)","");
+        // Not ready: the install found an older version (the base game, or an update before 1.09).
+        String title=o.titleId==null ? "" : o.titleId;
+        String version=o.appVer==null ? "" : o.appVer.replaceFirst("^0(?=\\d)","");
         String what="Installed: Bloodborne"+(title.isEmpty() ? "" : " "+title)
             +", version "+(version.isEmpty() ? "unknown" : version)+(where.isEmpty() ? "" : "\nin "+where)+".";
         new AlertDialog.Builder(activity).setTitle("Update 1.09 needed")

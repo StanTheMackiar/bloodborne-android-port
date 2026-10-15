@@ -467,14 +467,6 @@ public final class MainActivity extends Activity {
         if ("close-menu".equals(action)) closeDrawer();
     }
 
-    /** SIGTERM first: mods_android.py then stops the PKG tool it started and removes its staging
-     *  folder (a SIGKILL would leave the tool extracting on its own); SIGKILL if it hangs. */
-    private static void stopScript(Process p) {
-        if (!p.isAlive()) return;
-        p.destroy();
-        try { if (!p.waitFor(5,java.util.concurrent.TimeUnit.SECONDS)) p.destroyForcibly(); }
-        catch (InterruptedException e) { p.destroyForcibly(); Thread.currentThread().interrupt(); }
-    }
     private Process process(String... args) throws java.io.IOException { return process(new String[0],args); }
     /** extra: NAME=value pairs added to the environment. */
     private Process process(String[] extra,String... args) throws java.io.IOException {
@@ -495,8 +487,8 @@ public final class MainActivity extends Activity {
         for (String pair:extra) { int eq=pair.indexOf('='); env.put(pair.substring(0,eq),pair.substring(eq+1)); }
         return b.start();
     }
-    /** The runtime's scripts (mods.sh: PKG and mod installs) are needed before any game has started:
-     *  the runtime is otherwise unpacked only by startX. Blocks (off the UI thread). */
+    /** The runtime's PKG tool (bionic/bin/ps4-pkg-tool) is needed before any game has started: the runtime is
+     *  otherwise unpacked only by startX. Blocks (off the UI thread). */
     private void ensureRuntime() throws java.io.IOException {
         try { RuntimeInstaller.ensure(this,new File(FILES),message -> {}); }
         catch (java.io.IOException e) { throw e; }
@@ -750,38 +742,10 @@ public final class MainActivity extends Activity {
     }
     private GameInstaller.Host modsHost() {
         return new GameInstaller.Host() {
-            @Override public String script(String... args) throws java.io.IOException {
+            @Override public ModManager manager() { return modManager(); }
+            @Override public PkgInstaller pkgInstaller() throws java.io.IOException {
                 ensureRuntime();
-                if (!new File(BASE,ModsDialog.SCRIPT).isFile()) return null;
-                Process p=process(scriptCommand(ModsDialog.SCRIPT,args));
-                try {
-                    StringBuilder out=new StringBuilder();
-                    try (BufferedReader r=new BufferedReader(new InputStreamReader(p.getInputStream(),"UTF-8"))) {
-                        for (String line; (line=r.readLine())!=null && out.length()<(4<<20);) out.append(line).append('\n');
-                    }
-                    p.waitFor(30,java.util.concurrent.TimeUnit.SECONDS);
-                    return out.toString();
-                } catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new java.io.IOException("Interrupted"); }
-                finally { p.destroyForcibly(); }
-            }
-            @Override public boolean scriptStream(String script,java.util.function.Consumer<String> lines,AtomicBoolean cancel,String... args) throws java.io.IOException {
-                ensureRuntime();
-                if (!new File(BASE,script).isFile()) return false;
-                Process p=process(scriptCommand(script,args));
-                // Cancel (or the app closing) stops the process, which ends the read below.
-                Thread watch=new Thread(() -> {
-                    while (p.isAlive()) {
-                        if (cancel.get() || destroyed) { stopScript(p); return; }
-                        try { Thread.sleep(100); } catch (InterruptedException e) { return; }
-                    }
-                },"Mods-cancel");
-                watch.setDaemon(true); watch.start();
-                try (BufferedReader r=new BufferedReader(new InputStreamReader(p.getInputStream(),"UTF-8"))) {
-                    for (String line; (line=r.readLine())!=null;) lines.accept(line);
-                    p.waitFor();
-                } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-                finally { stopScript(p); watch.interrupt(); }
-                return true;
+                return new PkgInstaller(new File(BASE,"bionic/bin/ps4-pkg-tool"),line -> android.util.Log.i("Bloodborne-pkg",line));
             }
             @Override public File pathOf(android.net.Uri document) { return MainActivity.this.pathOf(document); }
             @Override public boolean hasStorage() {
@@ -816,12 +780,31 @@ public final class MainActivity extends Activity {
             @Override public boolean destroyed() { return destroyed; }
         };
     }
-    /** The runtime's tool scripts (mods.sh) run in the rootfs shell, like run-thor.sh. */
-    private String[] scriptCommand(String script,String[] args) {
-        String[] command=new String[args.length+2];
-        command[0]=ROOT+"/bin/sh"; command[1]=BASE+"/"+script;
-        System.arraycopy(args,0,command,2,args.length);
-        return command;
+    /** The mods folder (the mods_dir setting, else the default) and mods.json, as the game reads them at launch. */
+    private ModManager modManager() {
+        String configured=setting("mods_dir");
+        return new ModManager(new File(configured==null || configured.isEmpty() ? ModsDialog.DEFAULT_DIR : configured),
+            new File(BASE,"mods.json"));
+    }
+    /** The folder the game runs from (BB_APP0_DIR): the game folder with the enabled mods merged over it as a tree of
+     *  links (ModManager.apply), or the game folder itself without mods. null when no game folder is chosen (the launch
+     *  script then uses its own). Never throws: the game must start unmodded. Appends the "Mods: ..." lines to `log`. */
+    private String prepareMods(java.util.List<String> log) {
+        String gameFolder=gameDir;
+        if (gameFolder==null) return null;
+        File overlays=new File(BASE,"mod-game");
+        if ("0".equals(setting("mods_enabled"))) {
+            log.add("Mods: off");
+            FsUtil.deleteTree(overlays);
+            return gameFolder;
+        }
+        String folder=modManager().apply(new File(gameFolder),overlays,log::add);
+        if (!folder.equals(gameFolder) && !new File(folder,"eboot.bin").isFile()) {
+            log.add("Mods: could not be set up, starting without them");
+            FsUtil.deleteTree(overlays);
+            return gameFolder;
+        }
+        return folder;
     }
     private void startPending() {
         SurfaceHolder h=pendingHolder!=null ? pendingHolder : surface.getHolder();
@@ -1083,16 +1066,24 @@ public final class MainActivity extends Activity {
         new File(BASE,"ime.request").delete(); new File(BASE,"ime.request.result").delete();
         try {
             Process launched;
+            // The game folder with the mods merged over it: the launch script (run-common.sh) takes it from BB_APP0_DIR.
+            java.util.List<String> modsLog=new java.util.ArrayList<>();
+            String app0=prepareMods(modsLog);
+            for (String line:modsLog) android.util.Log.i("Bloodborne",line);
+            java.util.List<String> extra=new java.util.ArrayList<>();
+            if (app0!=null) extra.add("BB_APP0_DIR="+app0);
             if (bionic) {
                 // The surface's size in pixels: the present target of libbbgpu (BB_SCREEN_W/H).
                 int w=surface.getWidth(), h=surface.getHeight();
-                launched=process(new String[]{"BB_SCREEN_W="+(w>0 ? w : 1280),"BB_SCREEN_H="+(h>0 ? h : 720)},
-                    ROOT+"/bin/sh",BASE+"/run-bionic.sh","game");
-            } else launched=process(ROOT+"/bin/sh",BASE+"/run-thor.sh","game");
+                extra.add("BB_SCREEN_W="+(w>0 ? w : 1280)); extra.add("BB_SCREEN_H="+(h>0 ? h : 720));
+                launched=process(extra.toArray(new String[0]),ROOT+"/bin/sh",BASE+"/run-bionic.sh","game");
+            } else launched=process(extra.toArray(new String[0]),ROOT+"/bin/sh",BASE+"/run-thor.sh","game");
             game=launched;
             Thread log=new Thread(() -> {
                 try (BufferedReader r=new BufferedReader(new InputStreamReader(launched.getInputStream()));
                      PrintWriter out=new PrintWriter(new File(BASE,"logs/android-game.log"))) {
+                    for (String line:modsLog) out.println(line);
+                    out.flush();
                     String line; while ((line=r.readLine())!=null) { out.println(line); out.flush(); }
                     int code=launched.waitFor();
                     if (game==launched) { game=null; error("Game stopped ("+code+"). Open the menu to restart."); }

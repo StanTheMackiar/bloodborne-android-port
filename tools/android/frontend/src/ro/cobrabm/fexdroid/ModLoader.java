@@ -286,11 +286,4 @@ final class ModLoader {
             throw e;
         }
     }
-
-    /** The mods a folder holds as layers, in the order given (convenience for the tests). */
-    static List<Layer> layers(File modsDir, List<String> names) {
-        List<Layer> out = new ArrayList<>();
-        for (String n : names) out.add(new Layer(n, new File(modsDir, n)));
-        return out;
-    }
 }

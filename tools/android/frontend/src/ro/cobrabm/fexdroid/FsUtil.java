@@ -50,9 +50,6 @@ final class FsUtil {
     }
 
     static boolean isSymlink(File f) { return Files.isSymbolicLink(f.toPath()); }
-    /** Path.is_dir(): follows links. */
-    static boolean isDir(File f) { return f.isDirectory(); }
-
     /** Path.resolve(): the real path; where the platform cannot resolve a part of it (Android's shared storage
      *  shows /storage/emulated/0 but not always /storage/emulated), the path made absolute and normalized. */
     static File resolve(File f) {
