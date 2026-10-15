@@ -255,6 +255,40 @@ bool Rasterizer::OcclusionTranslated() {
     return enabled && VideoCore::GuestInPlace() && !BbToggle::Experiment(4);
 }
 
+bool Rasterizer::DrawHasNoEffect(const GraphicsPipeline* pipeline, const RenderState& state) {
+    // bbport: the game draws rect lists with colour and depth off (no target at all) and no pixel
+    // shader. They change nothing, and on the stock Adreno driver (512.676) such a draw never
+    // finishes: the GPU stops in that render pass. Not recording them is the same everywhere.
+    if (pipeline->GetStages()[u32(Shader::SwStage::Fragment)] || OcclusionTranslated()) {
+        return false;
+    }
+    const auto& ds = state.depth_stencil_attachment;
+    if (ds.has_depth || ds.has_stencil) {
+        return false;
+    }
+    for (u32 i = 0; i < state.num_color_attachments; ++i) {
+        if (state.color_attachments[i].image_view) {
+            return false;
+        }
+    }
+    for (const auto* info : pipeline->GetStages()) {
+        if (!info) {
+            continue;
+        }
+        for (const auto& buffer : info->buffers) {
+            if (buffer.is_written) {
+                return false;
+            }
+        }
+        for (const auto& image : info->images) {
+            if (image.is_written || image.is_atomic) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 bool Rasterizer::OcclusionEvent(VAddr address, u32 pairs) {
     if (!OcclusionTranslated() || pairs == 0) {
         return false;
@@ -1804,14 +1838,17 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         .program = {vs_info.ProgramBase(), ps_info ? ps_info->ProgramBase() : 0},
         .count = {num_indices, num_instances, 0},
     };
-    scheduler.RecordCrumb(crumb, [=](vk::CommandBuffer cmdbuf) {
-        cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, handle);
-        if (is_indexed) {
-            cmdbuf.drawIndexed(num_indices, num_instances, 0, s32(first_vertex), first_instance);
-        } else {
-            cmdbuf.draw(num_indices, num_instances, first_vertex, first_instance);
-        }
-    });
+    if (!DrawHasNoEffect(pipeline, state)) {
+        scheduler.RecordCrumb(crumb, [=](vk::CommandBuffer cmdbuf) {
+            cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, handle);
+            if (is_indexed) {
+                cmdbuf.drawIndexed(num_indices, num_instances, 0, s32(first_vertex),
+                                   first_instance);
+            } else {
+                cmdbuf.draw(num_indices, num_instances, first_vertex, first_instance);
+            }
+        });
+    }
     if (FrameCapture::Active()) {
         const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
         FrameCapture::Draw(vs_info.pgm_hash, ps ? ps->pgm_hash : 0, num_indices, num_instances);
@@ -1944,21 +1981,23 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
         .address = indirect.args,
         .count = {max_count, stride, 0},
     };
-    scheduler.RecordCrumb(crumb, [=](vk::CommandBuffer cmdbuf) {
-        cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, handle);
-        if (is_indexed) {
-            if (counts) {
-                cmdbuf.drawIndexedIndirectCount(args, args_offset, counts, counts_offset, max_count,
-                                                stride);
+    if (!DrawHasNoEffect(pipeline, state)) {
+        scheduler.RecordCrumb(crumb, [=](vk::CommandBuffer cmdbuf) {
+            cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, handle);
+            if (is_indexed) {
+                if (counts) {
+                    cmdbuf.drawIndexedIndirectCount(args, args_offset, counts, counts_offset, max_count,
+                                                    stride);
+                } else {
+                    cmdbuf.drawIndexedIndirect(args, args_offset, max_count, stride);
+                }
+            } else if (counts) {
+                cmdbuf.drawIndirectCount(args, args_offset, counts, counts_offset, max_count, stride);
             } else {
-                cmdbuf.drawIndexedIndirect(args, args_offset, max_count, stride);
+                cmdbuf.drawIndirect(args, args_offset, max_count, stride);
             }
-        } else if (counts) {
-            cmdbuf.drawIndirectCount(args, args_offset, counts, counts_offset, max_count, stride);
-        } else {
-            cmdbuf.drawIndirect(args, args_offset, max_count, stride);
-        }
-    });
+        });
+    }
     DebugState.IncDrawCall();
 
     ResetBindings(false);
