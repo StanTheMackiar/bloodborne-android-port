@@ -201,6 +201,18 @@ static void fault(int sig, siginfo_t *info, void *context) {
         snprintf(line, sizeof(line), "  called by the game at guest offset 0x%lx\n", (unsigned long)(regs.rip - (uintptr_t)image));
         ssize_t written_=write(2, line, strlen(line)); (void)written_;
     }
+#if defined(__aarch64__) && defined(__linux__)
+    /* A host fault: the caller (link register) locates a call through a null pointer. */
+    if (in_guest != GUEST_CPU_IN_GUEST) {
+        const uintptr_t lr = (uintptr_t)((ucontext_t *)context)->uc_mcontext.regs[30];
+        if (dladdr((void *)lr, &where) && where.dli_fname)
+            snprintf(line, sizeof(line), "  return address %s+0x%lx (%s)\n", where.dli_fname,
+                     (unsigned long)(lr - (uintptr_t)where.dli_fbase), where.dli_sname ? where.dli_sname : "?");
+        else
+            snprintf(line, sizeof(line), "  return address %p\n", (void *)lr);
+        ssize_t written_=write(2, line, strlen(line)); (void)written_;
+    }
+#endif
     if (gpu_enabled) bbgpu_dump_guest_writes(context);
     /* Outside the image and any shared object (generated code, a freed mapping): the mapping
      * from /proc/self/maps, and the thread. */
