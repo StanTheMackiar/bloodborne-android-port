@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Bionic (Android NDK) build of the native game process: libbbcpu.so (FEXCore), libbbgpu.so
-# (GPU/HLE), bb-probe (runtime executable), kgsl-chip-id. Phase 1 of the glibc -> Bionic port:
+# (GPU/HLE), bb-probe (runtime executable), kgsl-chip-id, bb-prepare. Phase 1 of the glibc -> Bionic port:
 # everything compiles and links for Bionic; nothing here is run on a device yet.
 # Prerequisite: tools/android/build_bionic_deps.sh (NDK + third-party libraries).
 # STL: c++_shared for all components (libbbcpu/libbbgpu/bb-probe share one libc++_shared.so; static
@@ -83,5 +83,7 @@ links=(-L"$out/lib" -lbbgpu -lbbcpu -Wl,-rpath,'$ORIGIN/../lib' -rdynamic -pie)
     src/probe.c src/runtime*.c src/vulkan_smoke.c "$out/libatrac9.a" -lm "${links[@]}" \
     -o "$out/bin/bb-probe"
 "${cc[@]}" -std=c11 -O2 -Wall -Wextra -Werror tools/android/kgsl_chip_id.c -pie -o "$out/bin/kgsl-chip-id"
+# bb-prepare: the game-preparation step (port of prepare_game.py), no Python or rootfs on the device.
+tools/android/build_prepare.sh android
 echo "Built $out/bin/bb-probe, $out/lib/libbbgpu.so, $out/lib/libbbcpu.so (Bionic, API $api)"
 tools/android/check_bionic_symbols.sh
