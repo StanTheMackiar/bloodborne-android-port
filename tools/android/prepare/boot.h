@@ -9,7 +9,8 @@
 
 struct Rel {
     u64 target, kind;
-    i64 value, addend;
+    i128 value;  // range-checked when written, like struct.pack('<QQqq') in the Python
+    i64 addend;
 };
 struct Boot {
     u64 size = 0, entry = 0, flags = 0;

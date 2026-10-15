@@ -135,7 +135,7 @@ void link_modules(const std::string& game, const std::string& out_dir, Boot& boo
             if (!mapped(r.target)) raise("ValueError", fname + ": relocation outside image " + hex(r.target));
             u64 target = r.target + base;
             if (r.kind == 8) {
-                relocs.push_back({target, 0, checked_q_signed((i128)base + r.addend), 0});
+                relocs.push_back({target, 0, (i128)base + r.addend, 0});
             } else if (r.kind == 16) {
                 if (r.sym >= m.symbols.size()) raise("IndexError", "list index out of range");
                 const Sym& s = m.symbols[r.sym];
@@ -147,7 +147,7 @@ void link_modules(const std::string& game, const std::string& out_dir, Boot& boo
                 const Sym& s = m.symbols[r.sym];
                 if (s.section) {
                     if (s.section == 0xfff1) put_q(image, target, checked_q_unsigned((i128)s.value + r.addend));
-                    else relocs.push_back({target, 0, checked_q_signed((i128)base + s.value + r.addend), 0});
+                    else relocs.push_back({target, 0, (i128)base + s.value + r.addend, 0});
                 } else if (!m.identities[r.sym].valid && s.binding == 2) {
                     put_q(image, target, 0);  // weak undefined (module_start/stop)
                 } else {
@@ -224,7 +224,7 @@ void link_modules(const std::string& game, const std::string& out_dir, Boot& boo
         head.insert(head.end(), n.begin(), n.end());
         head.insert(head.end(), 128 - n.size(), 0);
     }
-    for (auto& r : relocs) { q(r.target); q(r.kind); q((u64)r.value); q((u64)r.addend); }
+    for (auto& r : relocs) { q(r.target); q(r.kind); q((u64)checked_q_signed(r.value)); q((u64)r.addend); }
     out.write(head.data(), head.size());
     out.write(image.data(), image.size());
     out.close();

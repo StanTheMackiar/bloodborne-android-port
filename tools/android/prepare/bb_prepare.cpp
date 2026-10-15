@@ -101,7 +101,7 @@ Boot prepare(const std::string& game, const std::string& out) {
                         u64 q = checked_q_unsigned(v);
                         std::memcpy(boot.image.data() + target, &q, 8);
                     } else {
-                        boot.relocs.push_back({target, 0, checked_q_signed(v), 0});
+                        boot.relocs.push_back({target, 0, v, 0});
                     }
                 } else {
                     if (import_of[sym] < 0) {
@@ -126,6 +126,7 @@ Boot prepare(const std::string& game, const std::string& out) {
     make_dirs(out);
     for (auto& n : boot.names)
         if (n.size() >= 128) raise("ValueError", "import name too long");
+    for (auto& r : boot.relocs) checked_q_signed(r.value);  // boot.bin's struct.pack('<QQqq')
     for (auto& p : loads) boot.segments.push_back({p.vaddr, p.memsz, p.flags});
     boot.flags = init_env_ret;
     // analysis.json's inputs that can fail: bundled modules, param.sfo, the NEEDED names.
