@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ps4-pkg-tool (github.com/xXJSONDeruloXx/ps4-pkg-tools at 45baeda: shadPS4's PKG/PFS code, GPL-2.0),
-# the CLI that unpacks PS4 fake PKGs for the app's mod installer (ModsApi / PkgInstaller; before: mods_android.py install-pkg).
+# the CLI that unpacks PS4 fake PKGs for the app's mod installer (PkgInstaller in the frontend; before: mods_android.py install-pkg).
 # Built out of tree from the (read-only) source:
 #   arm64 -> out/arm64/pkg-tool/ps4-pkg-tool  (also copied to out/arm64/bundle/bin/ when that exists;
 #            build_release_runtime.py bundles it as bbport/arm64/bin/ps4-pkg-tool)
