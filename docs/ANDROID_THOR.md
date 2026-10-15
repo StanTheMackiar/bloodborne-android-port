@@ -16,6 +16,7 @@ archive as an asset. At the first start `RuntimeInstaller` unpacks it into the a
 bbport/bionic/bin/    bb-probe (the game process)  bb-prepare (game preparation)
                       kgsl-chip-id (GPU family)    ps4-pkg-tool (PKG installs)
 bbport/bionic/lib/    libbbgpu.so  libbbcpu.so (FEXCore)  libc++_shared.so
+                      liblsfg-bb.so (Lossless Scaling frame generation; libbbgpu loads it only when it is on)
 bbport/patch-parts/   the settings' game patches (effects, model detail, resolutions, cheats, ...)
 bbport/run-bionic.sh  the launch script (Android's own sh; toybox tools only)
 bbport/fex-compatible.json, bbport/bbport.default.ini, bbport/licenses/
@@ -45,8 +46,8 @@ missing). After checking the archive it calls `RuntimeCleanup.run`, which delete
 `drivers/` with an `icd.json` and no `driver.lib`). It never follows a symbolic link (the old rootfs has absolute
 ones that point out of the app), skips a path whose parent resolves outside `files/`, and refuses to delete the paths
 listed above as kept. Then it replaces `bbport/bionic` and `bbport/patch-parts` and unpacks the archive. A failed
-cleanup is logged and retried at the next start. `bbport/Lossless.dll`, if the Steam sign-in had saved one, is left
-in place. `tests/android-mods/run.sh` tests the cleanup (links, saves, drivers).
+cleanup is logged and retried at the next start. `bbport/Lossless.dll` (the Steam sign-in's or the picker's copy, for
+Lossless Scaling) is left in place. `tests/android-mods/run.sh` tests the cleanup (links, saves, drivers).
 
 ## Build
 
@@ -64,14 +65,15 @@ BB_APK_NAME=Bloodborne-bionic-test-<sha> tools/android/build_release_apk.sh   # 
 `build_release_runtime.py` stages the stripped programs and libraries, compiles the patch files with
 `build_patch_parts.py`, writes the archive and refuses it when it holds a symbolic link that leaves the tree, a device
 file, or a game-derived or Linux-runtime file. `build_frontend.sh` compiles the app with `javac --release 8`, builds
-`libbbpresent.so` with the NDK, dexes the mod libraries (`fetch_mod_libs.sh`: Commons Compress and xz) and signs with
+`libbbpresent.so` with the NDK, dexes the libraries of the Steam sign-in and the Mods menu (`fetch_steam_libs.sh`: JavaSteam, zstd-jni, ZXing, Commons Compress, xz) and signs with
 a local development key under `.local-deps/`. Tests: `tests/android-mods/run.sh`, `tests/test_prepare_native.py`
 (`tools/android/prepare_game.py` and `mods_android.py` stay as the reference the native and Java ports are
 compared with; they are not shipped).
 
 Turnip for Android builds (not part of the APK): `build_turnip_android.sh`, `release_turnip_android.py`. The glibc
-Turnip and Lossless Scaling build tools (`build_turnip.sh`, `release_turnip.py`, `mesa-patches/`, `build_lsfg.sh`,
-`lsfg-patches/`) are kept for reference; the app no longer uses them.
+Turnip and Lossless Scaling layer build tools (`build_turnip.sh`, `release_turnip.py`, `mesa-patches/`, `build_lsfg.sh`,
+`lsfg-patches/`) are kept for reference; the app no longer uses them. Lossless Scaling frame generation is
+`liblsfg-bb.so` (`build_lsfg_android.sh`, run by `build_bionic.sh`; [ANDROID_LSFG.md](ANDROID_LSFG.md)).
 
 ---
 

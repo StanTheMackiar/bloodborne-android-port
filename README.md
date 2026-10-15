@@ -48,7 +48,7 @@ FEXCore runs in its fastest mode (no x86 memory-ordering emulation, reduced x87 
 - **Mods**: install .zip, .7z or PS4 .pkg mods for 1.09, switch them on and off and set their load order
 - **Cheats**: infinite health and infinite blood vials/items, switched on and off while you play
 - **Game settings** in the app's menu: skip the online/offline screen (straight to the main menu), skip intros, free camera, debug menu
-- **FSR 3.1** upscaling and **FSR 3.1 frame generation** (poor image quality for now). Lossless Scaling frame generation is paused: it was built for the former Linux runtime and comes back once it is ported to the Android one
+- **FSR 3.1** upscaling and **FSR 3.1 frame generation** (poor image quality for now), and **Lossless Scaling frame generation** (2×–4×, needs your own Lossless.dll; untested on a device for now)
 - **On-screen PlayStation controller** with an editable layout; physical controllers work too
 - **GPU driver menu**: the phone's own Vulkan driver, or a Turnip for Android build downloaded from this project's releases (or any adrenotools-style zip)
 - 16:9 picture on any screen, including foldables
@@ -115,7 +115,7 @@ They are code hooks in the 1.09 executable (the same places as Shiningami's Gold
 
 ## Lossless Scaling frame generation
 
-Paused. It ran through lsfg-vk inside the former Linux runtime (see [docs/ANDROID_LSFG.md](docs/ANDROID_LSFG.md)); the app no longer has the Lossless Scaling and Steam sign-in menus. It comes back once the layer is ported to the Android runtime.
+In the Graphics settings: 2×, 3× or 4× frames, flow scale and performance mode. It needs `Lossless.dll` from your own copy of Lossless Scaling (Steam): the same screen signs in to Steam to download just that file, or copies one you choose. It replaces FSR 3.1 frame generation and raises the screen's refresh rate to the FPS limit times the multiplier. How it works, and what is and is not verified: [docs/ANDROID_LSFG.md](docs/ANDROID_LSFG.md).
 
 ## Build
 
@@ -123,7 +123,7 @@ Paused. It ran through lsfg-vk inside the former Linux runtime (see [docs/ANDROI
 git clone --recursive https://github.com/ducvd89/Bloodborne-Android.git
 cd Bloodborne-Android
 bash tools/android/build_bionic_deps.sh      # once: the NDK and the native libraries
-bash tools/android/build_bionic.sh           # the game process, bb-prepare, ps4-pkg-tool
+bash tools/android/build_bionic.sh           # the game process, bb-prepare, ps4-pkg-tool, liblsfg-bb.so
 bash tools/android/build_release_apk.sh      # the runtime archive and the APK
 ```
 
@@ -131,6 +131,6 @@ Build inputs (SDK, signing key, game icon) and the app's layout are in [docs/AND
 
 ## Credits
 
-[bloodborne_pc](https://github.com/deadinside28/bloodborne_pc) (Linux port), [shadPS4](https://github.com/shadps4-emu/shadPS4), [ARM_bloodborne_pc](https://github.com/MaSieS4Fun/ARM_bloodborne_pc), [FEX](https://github.com/FEX-Emu/FEX), [fexdroid](https://github.com/cobrabm12/fexdroid), [Mesa](https://gitlab.freedesktop.org/mesa/mesa), [mesa-unified turnip/gen8](https://github.com/whitebelyash/mesa-unified), [FSR-Vulkan](https://github.com/FireBurn/FSR-Vulkan), [lsfg-vk](https://github.com/PancakeTAS/lsfg-vk) and [GameNative](https://github.com/utkarshdalal/GameNative) (for LSFG on Android, paused), and [GoldHEN cheats](https://github.com/GoldHEN/GoldHEN_Cheat_Repository) (Shiningami).
+[bloodborne_pc](https://github.com/deadinside28/bloodborne_pc) (Linux port), [shadPS4](https://github.com/shadps4-emu/shadPS4), [ARM_bloodborne_pc](https://github.com/MaSieS4Fun/ARM_bloodborne_pc), [FEX](https://github.com/FEX-Emu/FEX), [fexdroid](https://github.com/cobrabm12/fexdroid), [Mesa](https://gitlab.freedesktop.org/mesa/mesa), [mesa-unified turnip/gen8](https://github.com/whitebelyash/mesa-unified), [FSR-Vulkan](https://github.com/FireBurn/FSR-Vulkan), [lsfg-vk](https://github.com/PancakeTAS/lsfg-vk) and [GameNative's Android fork of it](https://github.com/Ragnarok93/lsfg-vk-android) (Lossless Scaling frame generation), and [GoldHEN cheats](https://github.com/GoldHEN/GoldHEN_Cheat_Repository) (Shiningami).
 
 Licensed under [GPL-2.0](LICENSE); third-party notices in [THIRD_PARTY_LICENSES.txt](tools/android/frontend/THIRD_PARTY_LICENSES.txt). Not affiliated with Sony Interactive Entertainment, FromSoftware, Valve or the developers of Lossless Scaling.

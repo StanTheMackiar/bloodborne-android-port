@@ -8,6 +8,27 @@ https://gitlab.freedesktop.org/mesa/mesa; the Adreno 8xx variant from
 https://github.com/whitebelyash/mesa-unified, turnip/gen8, MIT), with this
 project's patches (tools/android/mesa-patches in the source).
 
+Lossless Scaling frame generation (bbport/bionic/lib/liblsfg-bb.so): the framegen
+backend and Lossless.dll shader extraction of GameNative's Android fork of lsfg-vk
+1.0, https://github.com/Ragnarok93/lsfg-vk-android (branch release, commit
+0802cd33319c101e4c41f6828153d3331d8a3258; lsfg-vk by PancakeTAS), MIT License,
+Copyright (c) 2025 lsfg-vk (bbport/licenses/lsfg-vk-android.LICENSE.md), with this
+port's changes (tools/android/lsfg-android-patches). It includes dxbc from DXVK
+(zlib/libpng license; Copyright (c) 2017 Philip Rebohle, 2019 Joshua Ashton, 2019
+Robin Kertels, 2023 Jeffrey Ellison), pe-parse (MIT, Copyright (c) 2013 Andrew Ruef)
+and volk (MIT, Copyright (c) 2018-2025 Arseny Kapoulkine); the licenses are in
+bbport/licenses/. Lossless Scaling and its Lossless.dll are not included: the app
+downloads the player's own copy from Steam, or the player copies it.
+
+Steam sign-in (downloads Lossless.dll from the player's own Lossless Scaling):
+JavaSteam 1.8.0 (MIT, https://github.com/Longi94/JavaSteam), with Kotlin and
+kotlinx.coroutines/io/serialization (Apache-2.0, JetBrains), Ktor (Apache-2.0,
+JetBrains), OkHttp and Okio (Apache-2.0, Square), Protocol Buffers for Java
+(BSD-3-Clause, Google), Apache Commons Lang 3 (Apache-2.0), SLF4J API (MIT),
+JetBrains annotations (Apache-2.0), XZ for Java (0BSD, Lasse Collin) and
+zstd-jni (BSD-2-Clause, Luben Karavelov; bundles Zstandard, BSD). The QR code
+is drawn with ZXing core 3.5.4 (Apache-2.0).
+
 Menu icons: Material Design icons (Apache-2.0, Google).
 
 Mods (unpacking .zip and .7z mod archives): Apache Commons Compress 1.26.1, Apache

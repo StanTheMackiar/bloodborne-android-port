@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.graphics.Typeface;
 import android.view.View;
+import android.widget.Button;
 import android.widget.CompoundButton;
 import android.widget.LinearLayout;
 import android.widget.RadioButton;
@@ -67,6 +68,8 @@ final class SettingsDialog {
     private static final String[] UPSCALER_VALUES={"off","fsr3"};
     private static final String[] UPSCALER_NAMES={"Off","FSR 3.1"};
     private static final int FSR3=1;
+    private static final String[] LSFG_VALUES={"0","2","3","4"};
+    private static final String[] LSFG_NAMES={"Off","2× frames","3× frames","4× frames"};
     private static final String[] FPS_VALUES={"30","40","45","60","0"};
     private static final String[] FPS_NAMES={"30 (the game's own)","40","45","60","Unlimited"};
     /** Snapdragon 8 Gen 2: three Cortex-A510, four Cortex-A715, one Cortex-X3. */
@@ -76,15 +79,28 @@ final class SettingsDialog {
     private static final String[] LOD_VALUES={"-2","0","1","2"};
     private static final String[] LOD_NAMES={"Highest","Game default","Lower","Lowest"};
 
+    /** The Lossless.dll side of the Lossless Scaling section, done by the activity (a file picker, the Steam
+     *  dialog, the app's storage). `done` runs on the main thread when the player is back from it. */
+    interface LosslessHost {
+        /** The Lossless.dll run-bionic.sh will use, or null. */
+        File dll();
+        void signIn(Runnable done);
+        void choose(Runnable done);
+    }
+
     private final Activity activity;
     private final File file;
     private final Runnable restart;
+    private LosslessHost lossless;
     private final Map<String,String> values=new LinkedHashMap<>();
     private final List<String> lines=new ArrayList<>();
 
     SettingsDialog(Activity activity,File file,Runnable restart) {
         this.activity=activity; this.file=file; this.restart=restart;
     }
+
+    /** Offers the Lossless.dll buttons in the Lossless Scaling section of the graphics settings. */
+    SettingsDialog withLossless(LosslessHost host) { lossless=host; return this; }
 
     private int dp(float n) { return Math.round(n*activity.getResources().getDisplayMetrics().density); }
     private String get(String key,String fallback) { String v=values.get(key); return v==null || v.isEmpty() ? fallback : v; }
@@ -200,6 +216,7 @@ final class SettingsDialog {
         box.addView(frameGenNote);
         final TextView presetNote=new TextView(activity); presetNote.setTextSize(13); presetNote.setAlpha(0.7f);
         box.addView(presetNote);
+        final Runnable[] exclusive=new Runnable[1]; // FSR 3.1 and Lossless Scaling frame generation: one at a time
         RadioGroup.OnCheckedChangeListener upscaling=(g,id) -> {
             int upscaler=checkedIndex(upscalers), output=Math.max(0,checkedIndex(outputs));
             boolean on=upscaler!=0;
@@ -207,6 +224,7 @@ final class SettingsDialog {
             for (int i=0;i<presets.getChildCount();++i) ((RadioButton)presets.getChildAt(i)).setText(presetName(output,i));
             for (int i=0;i<presets.getChildCount();++i) presets.getChildAt(i).setEnabled(on);
             frameGen.setEnabled(upscaler==FSR3);
+            if (exclusive[0]!=null) exclusive[0].run();
             presetNote.setText(on ? "Lower is faster; the upscaler fills the screen." : "Without upscaling the game renders at the output resolution.");
         };
         upscalers.setOnCheckedChangeListener(upscaling); outputs.setOnCheckedChangeListener(upscaling);
@@ -241,6 +259,56 @@ final class SettingsDialog {
             +"Off: the newest frame is shown, frames finished within the same refresh are skipped.");
         box.addView(vsyncNote);
 
+        heading(box,"Lossless Scaling frame generation");
+        final RadioGroup lsfg=choices(box,LSFG_NAMES,indexOf(LSFG_VALUES,get("lsfg_multiplier","0"),0));
+        final TextView flowLabel=new TextView(activity); flowLabel.setTextSize(14); box.addView(flowLabel);
+        final SeekBar flow=new SeekBar(activity); flow.setMax(15); // 0.25 .. 1.00 in steps of 0.05
+        float flowInitial=0.75f;
+        try { flowInitial=Float.parseFloat(get("lsfg_flow_scale","0.75")); } catch (NumberFormatException ignored) {}
+        flow.setProgress(Math.round((Math.max(0.25f,Math.min(1f,flowInitial))-0.25f)/0.05f));
+        SeekBar.OnSeekBarChangeListener flowText=new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar s,int p,boolean user) {
+                flowLabel.setText(String.format(Locale.ROOT,"Flow scale: %.2f (lower is faster, the motion is coarser)",0.25f+p*0.05f));
+            }
+            @Override public void onStartTrackingTouch(SeekBar s) {}
+            @Override public void onStopTrackingTouch(SeekBar s) {}
+        };
+        flow.setOnSeekBarChangeListener(flowText); flowText.onProgressChanged(flow,flow.getProgress(),false);
+        box.addView(flow);
+        final Switch lsfgPerformance=toggle(box,"Performance mode","1".equals(get("lsfg_performance","1")));
+        final TextView dllStatus=new TextView(activity); dllStatus.setTextSize(13); dllStatus.setPadding(0,dp(6),0,dp(2));
+        box.addView(dllStatus);
+        final Runnable showDll=() -> {
+            File dll=lossless==null ? null : lossless.dll();
+            dllStatus.setText(dll==null ? "Lossless.dll: not found" : "Lossless.dll: found at "+dll.getPath());
+        };
+        showDll.run();
+        if (lossless!=null) {
+            LinearLayout dllButtons=new LinearLayout(activity); dllButtons.setOrientation(LinearLayout.HORIZONTAL);
+            Button steam=new Button(activity); steam.setText("Sign in with Steam"); steam.setAllCaps(false);
+            steam.setOnClickListener(v -> lossless.signIn(showDll));
+            Button choose=new Button(activity); choose.setText("Choose Lossless.dll…"); choose.setAllCaps(false);
+            choose.setOnClickListener(v -> lossless.choose(showDll));
+            dllButtons.addView(steam,new LinearLayout.LayoutParams(0,-2,1)); dllButtons.addView(choose,new LinearLayout.LayoutParams(0,-2,1));
+            box.addView(dllButtons);
+        }
+        TextView lsfgNote=new TextView(activity); lsfgNote.setTextSize(13); lsfgNote.setAlpha(0.7f);
+        lsfgNote.setText("Needs Lossless.dll from your own Lossless Scaling on Steam: sign in to download just that file, "
+            +"or choose a copy. Shows 2-4 frames per game frame and raises the screen's refresh rate to the FPS limit times "
+            +"that (every frame is shown for one refresh, as with VSync). Replaces FSR 3.1 frame generation. "
+            +"Performance mode is the lighter model.");
+        box.addView(lsfgNote);
+        exclusive[0]=() -> {
+            boolean on=checkedIndex(lsfg)>0;
+            if (on) frameGen.setChecked(false);
+            frameGen.setEnabled(checkedIndex(upscalers)==FSR3 && !on);
+            for (int i=0;i<lsfg.getChildCount();++i) lsfg.getChildAt(i).setEnabled(!frameGen.isChecked());
+            flow.setEnabled(on); lsfgPerformance.setEnabled(on);
+        };
+        lsfg.setOnCheckedChangeListener((g,id) -> exclusive[0].run());
+        frameGen.setOnCheckedChangeListener((b,on) -> exclusive[0].run());
+        exclusive[0].run();
+
         heading(box,"CPU cores the game may use");
         final Switch[] cores=new Switch[CORE_NAMES.length];
         boolean[] allowed=parseCpus(get("thor_cpus",""),CORE_NAMES.length);
@@ -271,6 +339,13 @@ final class SettingsDialog {
                 changed.put("fps_limit",FPS_VALUES[Math.max(0,checkedIndex(fpsLimit))]);
                 changed.put("frame_generation",frameGen.isChecked() && checkedIndex(upscalers)!=0 ? "1" : "0");
                 changed.put("vsync",vsync.isChecked() ? "1" : "0");
+                int multiplier=Math.max(0,checkedIndex(lsfg));
+                changed.put("lsfg_multiplier",LSFG_VALUES[multiplier]);
+                changed.put("lsfg_flow_scale",String.format(Locale.ROOT,"%.2f",0.25f+flow.getProgress()*0.05f));
+                changed.put("lsfg_performance",lsfgPerformance.isChecked() ? "1" : "0");
+                if (multiplier>0 && lossless!=null && lossless.dll()==null)
+                    android.widget.Toast.makeText(activity,"Lossless Scaling stays off until Lossless.dll is found",
+                        android.widget.Toast.LENGTH_LONG).show();
                 changed.put("thor_cpus",cpuList(cores));
                 changed.put("preset",String.valueOf(Math.max(0,checkedIndex(presets))));
                 changed.put("sharpen",sharpen.isChecked() ? "1" : "0");

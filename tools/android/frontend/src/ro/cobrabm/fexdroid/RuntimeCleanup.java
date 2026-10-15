@@ -35,6 +35,7 @@ final class RuntimeCleanup {
     static final String[] PROTECTED = {
         "bbport/user", "bbport/bbport.ini", "bbport/bbport.default.ini", "bbport/mods.json", "bbport/game",
         "bbport/data", "bbport/bionic", "bbport/patch-parts", "bbport/audio.fifo", "home",
+        "bbport/Lossless.dll",         // the player's own copy (Steam sign-in or picker), for Lossless Scaling
     };
 
     private RuntimeCleanup() {}

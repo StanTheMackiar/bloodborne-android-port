@@ -1,23 +1,36 @@
-# Lossless Scaling frame generation on Android (experimental)
+# Lossless Scaling frame generation on Android
 
-The app includes [lsfg-vk](https://github.com/PancakeTAS/lsfg-vk) 1.0.0 (MIT) with patches for Turnip, which runs Lossless Scaling's frame generation as a Vulkan layer. Lossless Scaling itself is not included: it needs your own copy (Steam, app 993090).
+The game runs as a native Android (Bionic) process, so Lossless Scaling's frame generation is no longer a Vulkan layer: `liblsfg-bb.so` is the framegen backend of [GameNative's Android fork of lsfg-vk 1.0](https://github.com/Ragnarok93/lsfg-vk-android) (MIT; pinned commit, `tools/android/build_lsfg_android.sh`) behind a small C API (`tools/android/lsfg/bb_lsfg.h`). libbbgpu loads it with `dlopen` only when the multiplier is 2 or more. Lossless Scaling itself is not included: it needs your own copy (Steam, app 993090).
 
-1. Install Lossless Scaling on a PC through Steam and copy `Lossless.dll` from its folder (`steamapps/common/Lossless Scaling/Lossless.dll`).
-2. Put it next to your game folder on the phone, e.g. `/sdcard/Bloodborne/Lossless.dll` beside `/sdcard/Bloodborne/CUSA03173`.
-3. In the menu open **Lossless Scaling frame generation** and pick 2×, 3× or 4×. Lower flow scale and performance mode are faster. Changes apply while you play.
+## Using it
 
-It works with any upscaler and replaces FSR 3.1 frame generation. It sees only finished frames, without the game's motion vectors, so expect more artifacts around fast motion and the HUD than with FSR 3.1 frame generation. Its messages (`lsfg-vk: ...`) are in `files/bbport/logs/android-game.log`; `export LSFG_STATS=1` in `bbport/thor-local.sh` logs real and generated frames a second.
+1. Graphics settings → **Lossless Scaling frame generation**: 2×, 3× or 4×, flow scale (0.25–1.0: lower is faster and the motion coarser) and performance mode (the light model).
+2. **Sign in with Steam** downloads just `Lossless.dll` from your own copy (QR code or name/password; nothing but the file is kept), or **Choose Lossless.dll…** copies one from your storage (a PC copy is `steamapps/common/Lossless Scaling/Lossless.dll`). The file lives in `files/bbport/Lossless.dll`; `/sdcard/Bloodborne/Lossless.dll` is used when there is no such copy.
+3. Apply: the game restarts. Without a Lossless.dll the game logs one line (`Lossless Scaling frame generation: no Lossless.dll`) and runs without it.
+
+It replaces FSR 3.1 frame generation (the settings screen turns one off when you pick the other). It sees only finished frames, without the game's motion vectors, so expect more artifacts around fast motion and the HUD than with FSR 3.1 frame generation. Messages are in `files/bbport/logs/android-game.log` (`LSFG: ...`); `BB_LSFG_STATS=1` in `bbport/bionic-local.sh` logs real and generated frames a second.
+
+## How a frame goes (gpu/shadps4/video_core/renderer_vulkan/vk_lsfg.cpp, vk_presenter.cpp)
+
+For every real game frame, on the presenter's thread:
+
+1. The final picture (before the overlay) is blitted into one of two input AHardwareBuffers (alternating) in a submission of its own; its semaphore is exported as a sync file.
+2. `bb_lsfg_present` gives that sync file to the framegen, which runs on its own `VkDevice` of the same driver and physical device (made through the game's own `vkGetInstanceProcAddr`, so on the same Turnip), and makes the generated frames into output buffers. The call returns a sync file per generated frame and one for "done with the input buffers", which the next frame's copy waits for.
+3. Each generated frame and then the real frame are blitted into swapchain buffers (waiting on the sync files on the GPU) and queued at once; only the hand-over to the app is spaced evenly over the real frame interval (`BB_LSFG_PACE=0` hands them over back to back).
+
+Buffers change devices with queue-family ownership transfers to `VK_QUEUE_FAMILY_EXTERNAL`, as the fork's layer does. If a sync file cannot be exported or imported the call waits on the CPU (`BB_LSFG_SYNC=host` forces that); any other failure turns frame generation off and the game goes on with its own frames. The first four frames only fill the framegen's history.
 
 ## Pacing
 
-lsfg-vk presents the generated frames right after the real one and relies on FIFO presentation to space them, which is even only when the display runs at FPS limit × frames. While frame generation is on, the app picks that display mode when the panel has it (the Thor: 30 FPS × 2 → 60 Hz; 30 × 4, 40 × 3 or 60 × 2 → 120 Hz), else the fastest one. At the system's default 60 Hz, 45 real + 45 generated frames a second showed only 60 on screen.
+Generated frames only look right when each is shown for one refresh. With frame generation on, libbbgpu asks the app for FIFO presentation whatever the VSync setting says, and the app picks the display mode of FPS limit × multiplier when the panel has it (30 × 2: 60 Hz; 30 × 4, 40 × 3 or 60 × 2: 120 Hz), else the fastest one. The presentation needs the multiplier plus three swapchain buffers.
 
-Measured on the AYN Thor (Adreno 740), title screen, 2×, flow scale 0.75, performance mode: 45 real + 45 generated frames a second with the GPU 23% busy at 401 MHz; with a 30 FPS limit at 60 Hz nearly every frame was shown 16.8 ms apart.
+## What the fork's patches do (tools/android/lsfg-android-patches)
 
-## Why 1.0 with patches
+- `0001`: the framegen's Vulkan instance comes from the entry point the game process gives (`volkInitializeCustom`), not volk's own loader (the process loads its driver directly: no Android loader, no layers).
+- `0002`: the shaders are read from the one Lossless.dll the host names, not from a search of Steam folders (that removes the fork's config-file dependency).
 
-- lsfg-vk runs the frame generation on its own Vulkan device and shares images and semaphores with the game's. Upstream shares semaphores as OPAQUE_FD, which Turnip's KGSL backend cannot export (only sync files). lsfg-vk 2.0 additionally shares timeline semaphores between the devices, which KGSL cannot do at all, and its CC BY-NC-ND 4.0 licence allows no modified builds.
-- GameNative's 1.0 fork (Ragnarok93/lsfg-vk-android) solves this with AHardwareBuffers, but that path is bionic-only: this game runs in a glibc process with a glibc Turnip, which has neither.
-- `tools/android/lsfg-patches/0001-turnip-kgsl-sync-fd.patch`: the game side exports the frame-ready semaphore as a sync file after its copy is submitted, the framegen side exports each generated frame's semaphore the same way, and each side imports the other's temporarily. The shared images are created with the same usage on both devices, since Turnip derives tiling and UBWC from it. The layer disables itself instead of exiting the game when it cannot write its `/tmp` file (Android has none; it uses `TMPDIR`) or read the DLL, and `LSFG_STATS=1` logs frame rates.
+The fork's layer, adaptive scheduler and config parser are not built. `tools/android/build_lsfg.sh` and `tools/android/lsfg-patches` are the old glibc layer build, kept for reference.
 
-Building: `tools/android/build_lsfg.sh` compiles lsfg-vk v1.0.0 (pinned commit) with the patches in `tools/android/lsfg-patches/`.
+## Not verified on a device
+
+Written and built without a device: the AHardwareBuffer transport mode the fork picks on Turnip/Adreno (`ahb_transport=` in the log line at start), whether both devices agree on the buffers' tiling, sync-file export and import between the two devices, the context creation time (the framegen's pipelines are compiled at the first frame) and the frame pacing.

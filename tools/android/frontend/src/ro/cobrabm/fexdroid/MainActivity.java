@@ -6,6 +6,7 @@ import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -41,7 +42,7 @@ public final class MainActivity extends Activity {
     private String FILES, BASE;
     /** The game (e.g. CUSA03173, with eboot.bin) in shared storage, chosen by the player. */
     private String gameDir;
-    private static final int REQUEST_FOLDER=1, REQUEST_STORAGE=2, REQUEST_DRIVER=3, REQUEST_SAVES=9; // 4-6: ModsDialog, 7-8: GameInstaller
+    private static final int REQUEST_FOLDER=1, REQUEST_STORAGE=2, REQUEST_DRIVER=3, REQUEST_SAVES=9, REQUEST_DLL=10; // 4-6: ModsDialog, 7-8: GameInstaller
     private SurfaceHolder pendingHolder;
     private final Handler main=new Handler(Looper.getMainLooper());
     private final ExecutorService worker=Executors.newSingleThreadExecutor();
@@ -67,6 +68,8 @@ public final class MainActivity extends Activity {
     private GameInstaller installer;
     private AppUpdater updater;
     private LinearLayout updateItem;
+    /** Runs when the Lossless.dll picker returns (the graphics settings show the new state). */
+    private Runnable dllDone;
     private boolean drawerOpen, startingDisplay, hadError, swipeConsumed;
     private float touchX, touchY;
     private boolean edgeGesture, imeOpen, imePolling;
@@ -199,7 +202,7 @@ public final class MainActivity extends Activity {
         section("Graphics");
         graphicsItem=menuItem("ic_tune","Graphics settings","",() -> {
             closeDrawer();
-            new SettingsDialog(this,new File(BASE,"bbport.ini"),this::restartGame).show();
+            new SettingsDialog(this,new File(BASE,"bbport.ini"),this::restartGame).withLossless(lossless).show();
         });
         driverItem=menuItem("ic_memory","GPU driver","",() -> { closeDrawer(); showDrivers(); });
 
@@ -303,8 +306,10 @@ public final class MainActivity extends Activity {
         mods.summary(text -> setDetail(modsItem,text));
         String upscaler="off".equals(setting("upscaler")) ? "No upscaling" : "FSR 3.1";
         String limit=setting("fps_limit");
+        String lsfg=setting("lsfg_multiplier");
         setDetail(graphicsItem,upscaler+" · "+("0".equals(limit) ? "no FPS limit"
-            : (limit==null || !limit.matches("40|45|60") ? "30" : limit)+" FPS limit"));
+            : (limit==null || !limit.matches("40|45|60") ? "30" : limit)+" FPS limit")
+            +(lsfg!=null && lsfg.matches("[234]") ? " · Lossless Scaling ×"+lsfg+(losslessDll()==null ? " (no Lossless.dll)" : "") : ""));
         DriverManager.Driver driver=drivers.find(setting("gpu_driver"));
         setDetail(driverItem,driver==null ? "System driver (stock)" : driver.title());
         setDetail(controllerItem,controllerEnabled() ? "On" : "Off");
@@ -517,6 +522,12 @@ public final class MainActivity extends Activity {
             if (result==RESULT_OK && data!=null && data.getData()!=null) installDriver(data.getData());
             return;
         }
+        if (code==REQUEST_DLL) {
+            Uri dll=result==RESULT_OK && data!=null ? data.getData() : null;
+            Runnable done=dllDone; dllDone=null;
+            if (dll!=null) copyDll(dll,done); else { immersive(); if (done!=null) done.run(); }
+            return;
+        }
         if (code==ModsDialog.REQUEST_FOLDER || code==ModsDialog.REQUEST_ARCHIVE) { mods.onResult(code,result,data); return; }
         if (code==REQUEST_SAVES) {
             if (result==RESULT_OK && data!=null && data.getData()!=null) restoreSaves(folderOf(data.getData()));
@@ -540,6 +551,74 @@ public final class MainActivity extends Activity {
         getSharedPreferences("bloodborne",MODE_PRIVATE).edit().putString("game_dir",gameDir).apply();
         status.setText("Starting Bloodborne…");
         if (changed && game!=null) restartGame(); else startPending();
+    }
+    // ---- Lossless.dll for Lossless Scaling frame generation (liblsfg-bb.so reads its shaders) ----
+    /** The Lossless.dll run-bionic.sh uses: the app's own copy (bbport/, from Steam or the picker), else one
+     *  in the Bloodborne folder of shared storage. Null when there is none. */
+    private File losslessDll() {
+        for (File dll:new File[]{new File(BASE,"Lossless.dll"),new File("/storage/emulated/0/Bloodborne/Lossless.dll")})
+            if (dll.isFile() && dll.length()>0) return dll;
+        return null;
+    }
+    private final SettingsDialog.LosslessHost lossless=new SettingsDialog.LosslessHost() {
+        @Override public File dll() { return losslessDll(); }
+        @Override public void signIn(Runnable done) {
+            new SteamDllDialog(MainActivity.this,new File(BASE,"Lossless.dll"),() -> { immersive(); if (done!=null) done.run(); }).show();
+        }
+        @Override public void choose(Runnable done) {
+            Intent pick=new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*");
+            dllDone=done;
+            try { startActivityForResult(pick,REQUEST_DLL); }
+            catch (Exception ex) { dllDone=null; toast("No file picker: "+ex); }
+        }
+    };
+    /** Copies the chosen file to bbport/Lossless.dll when it is a Windows DLL (MZ header, PE signature), as
+     *  large as Lossless.dll can be (about 1-2 MB; 64 MB at most). */
+    private void copyDll(Uri source,Runnable done) {
+        Thread copy=new Thread(() -> {
+            String problem=null;
+            File target=new File(BASE,"Lossless.dll"), part=new File(BASE,"Lossless.dll.part");
+            try (java.io.InputStream in=getContentResolver().openInputStream(source);
+                 java.io.FileOutputStream out=new java.io.FileOutputStream(part)) {
+                if (in==null) throw new java.io.IOException("Cannot open the file");
+                byte[] buffer=new byte[65536]; long total=0; int count;
+                while ((count=in.read(buffer))>0) {
+                    total+=count;
+                    if (total>64L<<20) throw new java.io.IOException("The file is too large for Lossless.dll");
+                    out.write(buffer,0,count);
+                }
+                out.getFD().sync();
+                if (total==0) throw new java.io.IOException("The file is empty");
+                if (!isPeFile(part)) throw new java.io.IOException("That is not a Windows DLL (no PE header)");
+                if (!part.renameTo(target)) throw new java.io.IOException("Could not save Lossless.dll");
+            } catch (Exception ex) {
+                part.delete();
+                problem=ex.getMessage()!=null ? ex.getMessage() : ex.toString();
+                android.util.Log.w("Bloodborne","Lossless.dll: "+ex);
+            }
+            final String failure=problem;
+            main.post(() -> {
+                if (destroyed) return;
+                toast(failure==null ? "Lossless.dll is ready. It applies when the game restarts." : "Lossless.dll not saved: "+failure);
+                immersive();
+                if (done!=null) done.run();
+            });
+        },"Lossless-dll");
+        copy.setDaemon(true); copy.start();
+    }
+    /** "MZ" at 0 and "PE\0\0" where the DOS header's e_lfanew (offset 0x3c) points. */
+    private static boolean isPeFile(File file) {
+        try (java.io.RandomAccessFile f=new java.io.RandomAccessFile(file,"r")) {
+            if (f.length()<0x40) return false;
+            byte[] mz=new byte[2]; f.readFully(mz);
+            if (mz[0]!='M' || mz[1]!='Z') return false;
+            f.seek(0x3c);
+            int offset=Integer.reverseBytes(f.readInt());
+            if (offset<0x40 || offset>f.length()-4) return false;
+            f.seek(offset);
+            byte[] pe=new byte[4]; f.readFully(pe);
+            return pe[0]=='P' && pe[1]=='E' && pe[2]==0 && pe[3]==0;
+        } catch (Exception ex) { return false; }
     }
     // ---- Save data backup and restore (SaveBackup) ----
     private File savesDir() { return SaveBackup.saves(new File(BASE)); }
@@ -915,14 +994,17 @@ public final class MainActivity extends Activity {
         } catch (Exception ignored) {}
         return value;
     }
-    /** Frame generation (FSR 3.1) presents 2 frames per game frame, spaced by FIFO evenly only when the display
-     *  runs at FPS limit x 2: that mode when the display has it (30x2: 60 Hz, 40x2, 60x2: 120 Hz), else the
-     *  fastest one. Without frame generation, the system's choice. VSync (the vsync setting, a FIFO in the
-     *  app's bbpresent) is what makes that spacing reliable: each presented frame then stays up for exactly
-     *  one refresh, so a real frame and its generated one alternate evenly; without it frames that land in
-     *  the same refresh replace each other and the pairs skip. */
+    /** Frame generation (Lossless Scaling, or FSR 3.1) presents 2-4 frames per game frame, spaced by FIFO evenly
+     *  only when the display runs at FPS limit x frames: that mode when the display has it (30x2: 60 Hz, 30x4,
+     *  40x3, 60x2: 120 Hz), else the fastest one. Without frame generation, the system's choice. VSync (the vsync
+     *  setting, which Lossless Scaling turns on by itself: a FIFO in the app's bbpresent) is what makes that
+     *  spacing reliable: each presented frame then stays up for exactly one refresh, so a real frame and its
+     *  generated ones alternate evenly; without it frames that land in the same refresh replace each other and
+     *  the pairs skip. Lossless Scaling counts only with a Lossless.dll (else run-bionic.sh leaves it off). */
     private void pickRefreshRate() {
-        int frames="1".equals(setting("frame_generation")) ? 2 : 1;
+        String lsfg=setting("lsfg_multiplier");
+        int frames=lsfg!=null && lsfg.matches("[234]") && losslessDll()!=null ? Integer.parseInt(lsfg)
+            : "1".equals(setting("frame_generation")) ? 2 : 1;
         String limit=setting("fps_limit"); // as run-bionic.sh: 40, 45, 60, 0 (none), else 30
         final float target=frames*("40".equals(limit) || "45".equals(limit) || "60".equals(limit)
             ? Integer.parseInt(limit) : "0".equals(limit) ? 1000 : 30);

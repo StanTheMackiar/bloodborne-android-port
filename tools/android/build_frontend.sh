@@ -32,11 +32,12 @@ if icon.exists():
     Image.open(icon).save(out/'res/drawable/icon.png')
 PY
 cp tools/android/frontend/THIRD_PARTY_LICENSES.txt "$out/assets/"
-# The Mods menu's libraries (ModArchive.java: Apache Commons Compress and xz, for .zip and .7z mods).
-mod_libs=$PWD/.local-deps/android/mod-libs
-[[ -f $mod_libs/jars.txt ]] || bash tools/android/fetch_mod_libs.sh
-mapfile -t lib_jars < <(sed "s|^|$mod_libs/jars/|" "$mod_libs/jars.txt")
-mkdir -p "$out/lib/arm64-v8a"
+# The libraries of the Steam sign-in that downloads Lossless.dll (SteamDllDialog.java: JavaSteam and its
+# dependencies, ZXing, zstd-jni) and of the Mods menu (ModArchive.java: Commons Compress and xz).
+steam_libs=$PWD/.local-deps/android/steam-libs
+[[ -f $steam_libs/jars.txt ]] || bash tools/android/fetch_steam_libs.sh
+mapfile -t lib_jars < <(sed "s|^|$steam_libs/jars/|" "$steam_libs/jars.txt")
+mkdir -p "$out/lib/arm64-v8a" && cp "$steam_libs"/jni/*.so "$out/lib/arm64-v8a/"
 # libbbpresent.so: the Bionic game's frame path (AHardwareBuffers -> ASurfaceControl), built with the
 # NDK at minSdk 28 (the API 29 calls are looked up at run time). NEEDED: libandroid, liblog,
 # libnativewindow and libc/libm/libdl only.
