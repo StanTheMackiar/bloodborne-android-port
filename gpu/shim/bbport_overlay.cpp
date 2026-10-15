@@ -41,6 +41,14 @@ extern "C" void runtime_restart(void); // bb-probe (probe.c)
 namespace BbOverlay {
 
 namespace {
+/// bbport: stands in for a Vulkan function the driver does not give (the WSI functions with no
+/// surface or swapchain extension enabled: the Bionic build presents through the app). The
+/// ImGui backend loads its whole list and stops at the first one missing, leaving the rest
+/// null; it never calls the WSI ones (no platform windows).
+[[noreturn]] void MissingVulkanFunction() {
+    std::fprintf(stderr, "Overlay: a Vulkan function the driver does not provide was called\n");
+    std::abort();
+}
 
 std::mutex imgui_mutex; // the ImGui context: window thread (input) and present thread
 bool initialized = false;
@@ -768,7 +776,8 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
                 real_flush_ranges = reinterpret_cast<PFN_vkFlushMappedMemoryRanges>(function);
                 return reinterpret_cast<PFN_vkVoidFunction>(&FlushMappedMemoryRanges);
             }
-            return function;
+            return function ? function
+                            : reinterpret_cast<PFN_vkVoidFunction>(&MissingVulkanFunction);
         },
         const_cast<vk::Instance*>(&vk_instance));
 
