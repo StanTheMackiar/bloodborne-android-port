@@ -1,10 +1,12 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
 #include <numeric>
 
 #include "common/alignment.h"
 #include "common/assert.h"
+#include "bbport_toggles.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "bbport_guest_memory.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -27,6 +29,8 @@ std::string_view BufferTypeName(MemoryType type) {
         return "DeviceLocal";
     case MemoryType::Sparse:
         return "Sparse";
+    case MemoryType::Backed:
+        return "Backed";
     default:
         return "Invalid";
     }
@@ -77,15 +81,22 @@ void UniqueBuffer::Destroy() {
     } else if (buffer) {
         device.destroyBuffer(buffer);
     }
+    if (memory) {
+        // bbport MemoryType::Backed: the buffer's own memory goes with it.
+        device.freeMemory(memory);
+        BbStats::device_free_bytes.fetch_add(memory_size, std::memory_order_relaxed);
+    }
     buffer = VK_NULL_HANDLE;
     allocation = VK_NULL_HANDLE;
+    memory = VK_NULL_HANDLE;
+    memory_size = 0;
     bda_addr = 0;
 }
 
 void UniqueBuffer::Create(vk::BufferCreateInfo& buffer_ci, MemoryType mem_type,
                           VmaAllocationInfo* out_alloc_info) {
     const bool with_bda = bool(buffer_ci.usage & vk::BufferUsageFlagBits::eShaderDeviceAddress);
-    if (mem_type != MemoryType::Sparse) {
+    if (mem_type != MemoryType::Sparse && mem_type != MemoryType::Backed) {
         const VmaAllocationCreateFlags bda_flag =
             with_bda ? VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT : 0;
         const VmaAllocationCreateInfo alloc_ci = {
@@ -105,6 +116,49 @@ void UniqueBuffer::Create(vk::BufferCreateInfo& buffer_ci, MemoryType mem_type,
         ASSERT_MSG(result == VK_SUCCESS, "Failed allocating buffer with error {}",
                    vk::to_string(vk::Result{result}));
         buffer = vk::Buffer{unsafe_buffer};
+    } else if (mem_type == MemoryType::Backed) {
+        // bbport: an arena without sparse binding (BufferCache::NonSparseArenas): a plain buffer
+        // with one dedicated memory of its full size, allocated and bound here. Device-local
+        // memory first (Mali is UMA: the same memory is host-visible), then any type it accepts.
+        const vk::Result created = device.createBuffer(&buffer_ci, nullptr, &buffer);
+        ASSERT_MSG(created == vk::Result::eSuccess, "Failed to create a {} MiB arena buffer: {}",
+                   buffer_ci.size >> 20, vk::to_string(created));
+        const auto reqs = device.getBufferMemoryRequirements(buffer);
+        const VkPhysicalDeviceMemoryProperties* props = nullptr;
+        vmaGetMemoryProperties(allocator, &props);
+        std::array<u32, VK_MAX_MEMORY_TYPES> candidates{};
+        u32 candidate_count = 0;
+        for (const bool want_device_local : {true, false}) {
+            for (u32 i = 0; i < props->memoryTypeCount; ++i) {
+                const bool local = props->memoryTypes[i].propertyFlags &
+                                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+                if ((reqs.memoryTypeBits & (1u << i)) && local == want_device_local) {
+                    candidates[candidate_count++] = i;
+                }
+            }
+        }
+        const vk::MemoryAllocateFlagsInfo flags_info{
+            .flags = vk::MemoryAllocateFlagBits::eDeviceAddress,
+        };
+        vk::Result allocated = vk::Result::eErrorOutOfDeviceMemory;
+        for (u32 i = 0; i < candidate_count && !memory; ++i) {
+            const vk::MemoryAllocateInfo allocate_info{
+                .pNext = with_bda ? &flags_info : nullptr,
+                .allocationSize = reqs.size,
+                .memoryTypeIndex = candidates[i],
+            };
+            allocated = device.allocateMemory(&allocate_info, nullptr, &memory);
+            if (allocated != vk::Result::eSuccess) {
+                memory = VK_NULL_HANDLE;
+            }
+        }
+        ASSERT_MSG(memory, "Out of memory for a {} MiB buffer cache arena ({} memory types tried): {}",
+                   reqs.size >> 20, candidate_count, vk::to_string(allocated));
+        memory_size = reqs.size;
+        BbStats::device_alloc_bytes.fetch_add(memory_size, std::memory_order_relaxed);
+        const vk::Result bound = device.bindBufferMemory(buffer, memory, 0);
+        ASSERT_MSG(bound == vk::Result::eSuccess, "Binding the memory of a {} MiB arena failed: {}",
+                   reqs.size >> 20, vk::to_string(bound));
     } else {
         buffer_ci.flags |=
             vk::BufferCreateFlagBits::eSparseBinding | vk::BufferCreateFlagBits::eSparseResidency;
@@ -214,7 +268,8 @@ Buffer::Buffer(const Vulkan::Instance& instance, VAddr cpu_addr_, u64 size_bytes
     // bbport: arenas are also read by the readback queue (BufferCache::DownloadMemory).
     const std::array<u32, 2> families = {instance.GetGraphicsQueueFamilyIndex(),
                                          instance.GetReadbackQueueFamilyIndex()};
-    if (mem_type == MemoryType::Sparse && instance.GetReadbackQueue()) {
+    if ((mem_type == MemoryType::Sparse || mem_type == MemoryType::Backed) &&
+        instance.GetReadbackQueue()) {
         buffer_ci.sharingMode = vk::SharingMode::eConcurrent;
         buffer_ci.queueFamilyIndexCount = static_cast<u32>(families.size());
         buffer_ci.pQueueFamilyIndices = families.data();
@@ -229,7 +284,7 @@ Buffer::Buffer(const Vulkan::Instance& instance, VAddr cpu_addr_, u64 size_bytes
         Vulkan::SetObjectName(device, Handle(), "Buffer {:#x}:{:#x}", cpu_addr, size_bytes);
     }
 
-    if (mem_type != MemoryType::Sparse) {
+    if (mem_type != MemoryType::Sparse && mem_type != MemoryType::Backed) {
         VkMemoryPropertyFlags property_flags{};
         vmaGetAllocationMemoryProperties(instance.GetAllocator(), buffer.allocation,
                                          &property_flags);

@@ -255,6 +255,8 @@ private:
     };
 
     ArenaBinds* BindsForArena(const Buffer* arena) {
+        // Arenas without sparse binding own their memory: nothing is ever (un)bound.
+        ASSERT_MSG(!non_sparse_arenas, "Sparse bind of an arena that owns its memory");
         auto it = std::ranges::find(pending_binds, arena, &ArenaBinds::arena);
         if (it != pending_binds.end()) {
             return std::addressof(*it);
@@ -263,6 +265,10 @@ private:
     }
 
     const Buffer* GetArena(u64 first_block, u64 last_block);
+    /// bbport, non_sparse_arenas: the blocks resident in the arenas that `merged` (covering blocks
+    /// [base_block, end_block)) replaces are copied into it on the GPU, in stream order, and their
+    /// residency and BDA page table entries point to it. Before address_space changes.
+    void MigrateBackedArenas(const Buffer* merged, u64 base_block, u64 end_block);
 
     /// `in_place`: bind what can be in place even when Garlic (texture data, read once into an
     /// image: a VRAM copy of it would only cost an upload).
@@ -592,6 +598,10 @@ private:
     u64 bind_wait_tick = 0;                            ///< the next arena binds wait for it
     std::array<std::unique_ptr<Buffer>, 256> chunk_buffers{}; ///< per guest memory chunk (Chunk::index)
 
+    /// bbport: arenas are plain buffers that own their memory, allocated when created
+    /// (NonSparseArenas): no vkQueueBindSparse, residency of a block is its place in the arena's
+    /// memory, nothing is evicted, demoted or promoted. Set at construction.
+    bool non_sparse_arenas = false;
     u32 arena_memory_type_index{};
     /// bbport: system memory for residency when VRAM is full (4 GB cards), if sparse binding takes it
     std::optional<u32> arena_fallback_type_index;

@@ -351,6 +351,17 @@ public:
         return properties.vendorID;
     }
 
+    /// bbport: ARM Mali (the PanVK driver): no sparse binding on kbase, no robustImageAccess2.
+    bool IsMali() const {
+        return properties.vendorID == 0x13B5;
+    }
+
+    /// bbport: the device reports sparse binding and sparse resident buffers (the buffer cache's
+    /// sparse arenas). PanVK on kbase reports neither.
+    bool HasSparseBuffers() const {
+        return features.sparseBinding && features.sparseResidencyBuffer;
+    }
+
     /// Returns the device ID of the physical device
     u32 GetDeviceID() const {
         return properties.deviceID;

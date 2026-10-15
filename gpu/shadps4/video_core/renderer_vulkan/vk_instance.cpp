@@ -302,10 +302,32 @@ bool Instance::CreateDevice() {
                "Required Vulkan extension unavailable: {}", VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
 
     const auto robustness2_features = feature_chain.get<vk::PhysicalDeviceRobustness2FeaturesEXT>();
-    ASSERT_MSG(robustness2_features.robustBufferAccess2,
-               "Required Vulkan feature unavailable: robustBufferAccess2");
-    ASSERT_MSG(robustness2_features.robustImageAccess2,
-               "Required Vulkan feature unavailable: robustImageAccess2");
+    // bbport: PanVK (Mali) reports robustImageAccess2 = false on every Mali and robustBufferAccess2
+    // only from arch v11 (G610/G310 are v10), so on Mali the two are optional: the core
+    // robustBufferAccess (VkPhysicalDeviceFeatures) and the Vulkan 1.3 robustImageAccess, both
+    // passed through below, take their place. Every other GPU keeps requiring them.
+    bool enable_robust_buffer_access2 = true;
+    bool enable_robust_image_access2 = true;
+    if (IsMali()) {
+        enable_robust_buffer_access2 = robustness2_features.robustBufferAccess2;
+        enable_robust_image_access2 = robustness2_features.robustImageAccess2;
+        if (!enable_robust_buffer_access2) {
+            std::printf(
+                "Mali: robustBufferAccess2 not reported: relying on core robustBufferAccess (%u)\n",
+                features.robustBufferAccess);
+        }
+        if (!enable_robust_image_access2) {
+            std::printf(
+                "Mali: robustImageAccess2 not reported: relying on Vulkan 1.3 robustImageAccess "
+                "(%u)\n",
+                feature_chain.get<vk::PhysicalDeviceVulkan13Features>().robustImageAccess);
+        }
+    } else {
+        ASSERT_MSG(robustness2_features.robustBufferAccess2,
+                   "Required Vulkan feature unavailable: robustBufferAccess2");
+        ASSERT_MSG(robustness2_features.robustImageAccess2,
+                   "Required Vulkan feature unavailable: robustImageAccess2");
+    }
     ASSERT_MSG(robustness2_features.nullDescriptor,
                "Required Vulkan feature unavailable: nullDescriptor");
 
@@ -580,8 +602,8 @@ bool Instance::CreateDevice() {
             .depthClipEnable = true,
         },
         vk::PhysicalDeviceRobustness2FeaturesEXT{
-            .robustBufferAccess2 = true,
-            .robustImageAccess2 = true,
+            .robustBufferAccess2 = enable_robust_buffer_access2,
+            .robustImageAccess2 = enable_robust_image_access2,
             .nullDescriptor = true,
         },
         vk::PhysicalDeviceVertexInputDynamicStateFeaturesEXT{

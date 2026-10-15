@@ -10,6 +10,7 @@
 #include <mutex>
 #include <sys/mman.h>
 #include <unistd.h>
+#include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "bblayer_gpu_memory.h"
 
@@ -699,6 +700,10 @@ vk::ExternalMemoryHandleTypeFlagBits HandleType() {
 }
 
 void Install(const Vulkan::Instance& instance) {
+    // The buffer cache has no sparse arena to bind guest memory chunks into (NonSparseArenas).
+    if (VideoCore::NonSparseArenas()) {
+        return;
+    }
     // BB_GUEST_IN_PLACE (the GPU uses this memory in place) needs it too.
     const char* env = std::getenv("BB_GUEST_GPU_MEMORY");
     const char* in_place = std::getenv("BB_GUEST_IN_PLACE");
