@@ -14,9 +14,9 @@ fail=0
 allowed='^(libc\.so|libm\.so|libdl\.so|liblog\.so|libandroid\.so|libnativewindow\.so|libc\+\+_shared\.so|libbbgpu\.so|libbbcpu\.so|libSDL3\.so)$'
 defined() { "$llvm/llvm-nm" -D --defined-only "$@" 2>/dev/null | awk 'NF>=3{print $3}' | sed 's/@.*//'; }
 provided=$(mktemp); trap 'rm -f "$provided"' EXIT
-{ defined "$out/bin/bb-probe" "$out/lib/libbbgpu.so" "$out/lib/libbbcpu.so" "$out/lib/libc++_shared.so"
+{ defined "$out/bin/bb-probe" "$out/bin/bb-prepare" "$out/lib/libbbgpu.so" "$out/lib/libbbcpu.so" "$out/lib/libc++_shared.so"
   for lib in libc.so libm.so libdl.so liblog.so libandroid.so libnativewindow.so; do defined "$sysroot_libs/$lib"; done; } | sort -u > "$provided"
-for f in "$out/bin/bb-probe" "$out/bin/kgsl-chip-id" "$out/lib/libbbgpu.so" "$out/lib/libbbcpu.so"; do
+for f in "$out/bin/bb-probe" "$out/bin/kgsl-chip-id" "$out/bin/bb-prepare" "$out/lib/libbbgpu.so" "$out/lib/libbbcpu.so"; do
     echo "== $f"
     "$llvm/llvm-readelf" -d "$f" | grep -E 'NEEDED|SONAME|RUNPATH' | sed 's/^ *0x[0-9a-f]* *//'
     for lib in $("$llvm/llvm-readelf" -d "$f" | sed -n 's/.*NEEDED.*\[\(.*\)\]/\1/p'); do
