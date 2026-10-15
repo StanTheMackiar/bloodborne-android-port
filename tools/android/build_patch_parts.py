@@ -16,8 +16,9 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts'))
 import patches  # noqa: E402
 
-# Outputs the Thor offers (its screen is 1920x1080): the upscaler's output, the game's UI size.
-OUTPUTS = [(1280, 720), (1920, 1080)]
+# The three outputs the app offers (1080p, 720p, 480p; output_res in the settings): the upscaler's
+# output and the size of the UI it composes over the scene.
+OUTPUTS = [(1280, 720), (1920, 1080), (854, 480)]
 
 
 def render_sizes():

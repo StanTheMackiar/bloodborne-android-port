@@ -28,9 +28,18 @@ import java.util.Map;
 /** Graphics settings for the Thor, kept in bbport.ini (run-bionic.sh reads them at start: scene
  *  size, upscaler, the game's effect patches). Other lines and comments of the file are kept. */
 final class SettingsDialog {
-    /** Scene sizes of the presets at the Thor's 1280x720 output (run-bionic.sh). */
-    private static final String[] PRESETS={"Native (1280×720)","Quality (854×480)","Balanced (752×424)",
-        "Performance (640×360)","Ultra performance (426×240)"};
+    /** The outputs offered (output_res; 720p when missing) and the presets: the scene size is the output
+     *  divided by the scale, rounded to even (run-bionic.sh and build_patch_parts.py use the same sizes). */
+    private static final String[] OUTPUT_VALUES={"1920x1080","1280x720","854x480"};
+    private static final String[] OUTPUT_NAMES={"1080p (1920×1080)","720p (1280×720)","480p (854×480)"};
+    private static final int[][] OUTPUT_SIZES={{1920,1080},{1280,720},{854,480}};
+    private static final int OUTPUT_DEFAULT=1;
+    private static final String[] PRESET_NAMES={"Native","Quality","Balanced","Performance","Ultra performance"};
+    private static final double[] PRESET_SCALES={1.0,1.5,1.7,2.0,3.0};
+    private static int scene(int v,int preset) { return Math.max(2,(int)Math.rint(v/PRESET_SCALES[preset]/2)*2); }
+    private static String presetName(int output,int preset) {
+        return PRESET_NAMES[preset]+" ("+scene(OUTPUT_SIZES[output][0],preset)+"×"+scene(OUTPUT_SIZES[output][1],preset)+")";
+    }
     private static final String[][] EFFECTS={
         {"effect_chromatic_aberration","Chromatic aberration","1"},
         {"effect_dof","Depth of field","1"},
@@ -56,7 +65,7 @@ final class SettingsDialog {
             +"(items moved to storage or given away stay too)","0"},
     };
     private static final String[] UPSCALER_VALUES={"off","fsr3"};
-    private static final String[] UPSCALER_NAMES={"Off (render at 1280×720)","FSR 3.1"};
+    private static final String[] UPSCALER_NAMES={"Off","FSR 3.1"};
     private static final int FSR3=1;
     private static final String[] FPS_VALUES={"30","40","45","60","0"};
     private static final String[] FPS_NAMES={"30 (the game's own)","40","45","60","Unlimited"};
@@ -173,12 +182,17 @@ final class SettingsDialog {
         LinearLayout box=new LinearLayout(activity); box.setOrientation(LinearLayout.VERTICAL);
         box.setPadding(dp(24),dp(4),dp(24),dp(8));
 
-        heading(box,"Upscaling (to 1280×720)");
+        heading(box,"Output resolution");
+        final RadioGroup outputs=choices(box,OUTPUT_NAMES,indexOf(OUTPUT_VALUES,get("output_res",""),OUTPUT_DEFAULT));
+        TextView outputNote=new TextView(activity); outputNote.setTextSize(13); outputNote.setAlpha(0.7f);
+        outputNote.setText("Higher output looks sharper but costs more GPU time; the upscaler renders the scene smaller and fills it.");
+        box.addView(outputNote);
+        heading(box,"Upscaling");
         final RadioGroup upscalers=choices(box,UPSCALER_NAMES,indexOf(UPSCALER_VALUES,get("upscaler","fsr3"),1));
         heading(box,"Render resolution");
         int preset=0;
         try { preset=Math.max(0,Math.min(4,Integer.parseInt(get("preset","3")))); } catch (NumberFormatException ignored) { preset=3; }
-        final RadioGroup presets=choices(box,PRESETS,preset);
+        final RadioGroup presets=choices(box,PRESET_NAMES,preset);
         final Switch frameGen=toggle(box,"FSR 3.1 frame generation","1".equals(get("frame_generation","0")));
         TextView frameGenNote=new TextView(activity); frameGenNote.setTextSize(13); frameGenNote.setAlpha(0.7f);
         frameGenNote.setText("Shows a generated frame between each two (about twice the frames on screen); "
@@ -187,13 +201,16 @@ final class SettingsDialog {
         final TextView presetNote=new TextView(activity); presetNote.setTextSize(13); presetNote.setAlpha(0.7f);
         box.addView(presetNote);
         RadioGroup.OnCheckedChangeListener upscaling=(g,id) -> {
-            int upscaler=checkedIndex(upscalers);
+            int upscaler=checkedIndex(upscalers), output=Math.max(0,checkedIndex(outputs));
             boolean on=upscaler!=0;
+            ((RadioButton)upscalers.getChildAt(0)).setText("Off (render at "+OUTPUT_SIZES[output][0]+"×"+OUTPUT_SIZES[output][1]+")");
+            for (int i=0;i<presets.getChildCount();++i) ((RadioButton)presets.getChildAt(i)).setText(presetName(output,i));
             for (int i=0;i<presets.getChildCount();++i) presets.getChildAt(i).setEnabled(on);
             frameGen.setEnabled(upscaler==FSR3);
-            presetNote.setText(on ? "Lower is faster; the upscaler fills the screen." : "Without upscaling the game renders at 1280×720.");
+            presetNote.setText(on ? "Lower is faster; the upscaler fills the screen." : "Without upscaling the game renders at the output resolution.");
         };
-        upscalers.setOnCheckedChangeListener(upscaling); upscaling.onCheckedChanged(upscalers,0);
+        upscalers.setOnCheckedChangeListener(upscaling); outputs.setOnCheckedChangeListener(upscaling);
+        upscaling.onCheckedChanged(upscalers,0);
 
         heading(box,"Image");
         final Switch sharpen=toggle(box,"Sharpening","1".equals(get("sharpen","0")));
@@ -243,6 +260,7 @@ final class SettingsDialog {
             .setNegativeButton("Cancel",null)
             .setPositiveButton("Apply & restart",(d,w) -> {
                 Map<String,String> changed=new LinkedHashMap<>();
+                changed.put("output_res",OUTPUT_VALUES[Math.max(0,checkedIndex(outputs))]);
                 changed.put("upscaler",UPSCALER_VALUES[Math.max(0,checkedIndex(upscalers))]);
                 changed.put("fps_limit",FPS_VALUES[Math.max(0,checkedIndex(fpsLimit))]);
                 changed.put("frame_generation",frameGen.isChecked() && checkedIndex(upscalers)!=0 ? "1" : "0");

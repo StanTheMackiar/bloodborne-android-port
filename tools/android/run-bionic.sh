@@ -31,17 +31,32 @@ setting() { sed -n "s/^$1=//p" "$BB_CONFIG" 2>/dev/null | tail -n 1; }
 export BB_ANDROID_INPUT=1
 export BB_PAD_FILE="$base/android-pad.state" BB_PAD_QUIET=1
 export BB_IME_FILE="$base/ime.request"
-# The output is 1280x720; the preset sets the scene size, FSR 3.1 upscales it to the output.
-upscaler=$(setting upscaler); preset=$(setting preset)
+# The output (output_res: 1920x1080, 1280x720 or 854x480; 720p when missing) is the size of the final
+# frame and the UI; the preset sets the scene size relative to it, FSR 3.1 upscales it to the output.
+upscaler=$(setting upscaler); preset=$(setting preset); output=$(setting output_res)
 # FSR 4 (INT8 models) is not offered: on the Adreno 740 it took ~3 min to compile in Turnip, then ran
 # at 2.4 FPS with a black scene. Any value but off means FSR 3.1.
 case $upscaler in off) ;; *) upscaler=fsr3 ;; esac
 echo "Upscaler setting: $upscaler"
 case $preset in 0|1|2|3|4) ;; *) preset=3 ;; esac
-render=1280x720
+case $output in 1920x1080|1280x720|854x480) ;; *) output=1280x720 ;; esac
+# The scene size: the output / the preset's scale (1.5, 1.7, 2, 3), each side rounded to even, as
+# build_patch_parts.py (render_sizes()) names the res-*.bin patches.
+render=$output
 if [ "$upscaler" != off ]; then
-    case $preset in 1) render=854x480 ;; 2) render=752x424 ;; 3) render=640x360 ;; 4) render=426x240 ;; esac
+    case $output:$preset in
+        1920x1080:1) render=1280x720 ;; 1920x1080:2) render=1130x636 ;; 1920x1080:3) render=960x540 ;;
+        1920x1080:4) render=640x360 ;;
+        1280x720:1) render=854x480 ;; 1280x720:2) render=752x424 ;; 1280x720:3) render=640x360 ;;
+        1280x720:4) render=426x240 ;;
+        854x480:1) render=570x320 ;; 854x480:2) render=502x282 ;; 854x480:3) render=428x240 ;;
+        854x480:4) render=284x160 ;;
+    esac
 fi
+# A scene of the game's own 1920x1080 (1080p Native, or 1080p without the upscaler) needs no resolution
+# patch and no BB_RENDER_RES: the renderer then takes the game's targets as they are (with
+# BB_RENDER_RES it tells the scene from the 1920x1080 UI by its size).
+if [ "$render" = 1920x1080 ]; then render=; preset=0; fi
 export BB_FULLSCREEN=1 BB_UPSCALER=$upscaler BB_UPSCALE_PRESET=$preset
 # FSR 3.1 frame generation (frame_generation=1): a frame between each two, with FSR 3.1 only.
 [ "$(setting frame_generation)" = 1 ] && [ "$upscaler" = fsr3 ] && export BB_FRAME_GEN=1
@@ -51,8 +66,9 @@ export BB_INDIRECT_GUARD=${BB_INDIRECT_GUARD:-0}
 # The two-stage draw pipeline (bb:DrawRec) frees the GPU command thread: 31 -> 34 FPS on the Thor
 # with all cores. BB_DRAW_PIPE=0 in bionic-local.sh turns it off.
 export BB_DRAW_PIPE=${BB_DRAW_PIPE:-1}
-export BB_WINDOW_SIZE=1280x720
-export BB_RENDER_RES=$render BB_OUTPUT_RES=1280x720 BB_LIVE_RES=0
+export BB_WINDOW_SIZE=$output
+export BB_OUTPUT_RES=$output BB_LIVE_RES=0
+if [ -n "$render" ]; then export BB_RENDER_RES=$render; else unset BB_RENDER_RES; fi
 export BB_DMEM_MB=5056 BB_PREUPLOAD=0 BB_GUEST_IN_PLACE=0 BB_UFFD=0
 export BB_COPY_GPU_BUFFERS=1 BB_GPU_WRITE_TWINS=1 BB_GPU_WRITE_TWINS_MAX=65536
 # GPU memory is the phone's system RAM, shared with the game's 5 GB and Android: the texture
@@ -125,7 +141,11 @@ if [ "${1:-game}" = game ]; then
     # paths has a space).
     parts="$base/patch-parts"
     [ -d "$parts" ] || { echo "The patches are missing: $parts" >&2; exit 2; }
-    patch_args="--patches $parts/res-$render.bin"
+    patch_args=
+    if [ -n "$render" ]; then
+        [ -f "$parts/res-$render.bin" ] || { echo "The patch for the scene size $render is missing: $parts/res-$render.bin" >&2; exit 2; }
+        patch_args="--patches $parts/res-$render.bin"
+    fi
     for key in effect_chromatic_aberration effect_dof effect_motion_blur effect_ssao \
                effect_game_aa effect_dynamic_shadows effect_ssr skip_intro debug_camera debug_menu model_lod; do
         value=$(setting "$key")
