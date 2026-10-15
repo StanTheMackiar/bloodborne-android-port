@@ -101,8 +101,9 @@ void FsrPass::Create(vk::Device device, VmaAllocator allocator, u32 num_images) 
         },
         .layout = pipeline_layout.get(),
     };
-    easu_pipeline =
-        Check<"fsp easu compute pipelines">(device.createComputePipelineUnique({}, easu_pinfo));
+    auto easu_rv = device.createComputePipelineUnique({}, easu_pinfo);
+    ReportPipelineFailure("fsr_easu", easu_rv.result, std::span{&easu_pinfo.stage, 1});
+    easu_pipeline = Check<"fsp easu compute pipelines">(std::move(easu_rv));
     SetObjectName(device, easu_pipeline.get(), "fsr easu pipeline");
 
     const vk::ComputePipelineCreateInfo rcas_pinfo{
@@ -113,8 +114,9 @@ void FsrPass::Create(vk::Device device, VmaAllocator allocator, u32 num_images) 
         },
         .layout = pipeline_layout.get(),
     };
-    rcas_pipeline =
-        Check<"fsp rcas compute pipelines">(device.createComputePipelineUnique({}, rcas_pinfo));
+    auto rcas_rv = device.createComputePipelineUnique({}, rcas_pinfo);
+    ReportPipelineFailure("fsr_rcas", rcas_rv.result, std::span{&rcas_pinfo.stage, 1});
+    rcas_pipeline = Check<"fsp rcas compute pipelines">(std::move(rcas_rv));
     SetObjectName(device, rcas_pipeline.get(), "fsr rcas pipeline");
 
     device.destroyShaderModule(cs_easu_module);

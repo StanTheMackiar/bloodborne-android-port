@@ -185,6 +185,8 @@ vk::Pipeline TileManager::GetTilingPipeline(const ImageInfo& info, bool is_tiler
 
     auto [result, pipeline] =
         device.createComputePipelineUnique(VK_NULL_HANDLE, compute_pipeline_ci);
+    Vulkan::ReportPipelineFailure(fmt::format("tiling {}", module_name), result,
+                                  std::span{&shader_ci, 1});
     ASSERT_MSG(result == vk::Result::eSuccess, "Detiler pipeline creation failed {}",
                vk::to_string(result));
     const auto handle = *pipeline;

@@ -423,6 +423,8 @@ GraphicsPipeline::GraphicsPipeline(
 
     auto [pipeline_result, pipe] =
         device.createGraphicsPipelineUnique(pipeline_cache, pipeline_info);
+    ReportPipelineFailure(fmt::format("graphics {}", debug_str), pipeline_result,
+                          std::span<const vk::PipelineShaderStageCreateInfo>{shader_stages});
     if (preloading && pipeline_result != vk::Result::eSuccess) {
         // bbport: a pipeline from the cache the driver rejects is a damaged cache entry: the
         // cache is rebuilt (PipelineCache::WarmUp) instead of stopping the game at every start.

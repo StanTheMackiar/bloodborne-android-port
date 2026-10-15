@@ -69,13 +69,7 @@ static bool MultiCopy(Rasterizer& rasterizer, const VideoCore::Buffer* src,
             .pSetLayouts = &*p.set_layout,
         }));
         const auto module = CompileSPV(BUFFER_MULTI_COPY_COMP, device);
-        p.pipeline = Check(device.createComputePipelineUnique(
-            {}, vk::ComputePipelineCreateInfo{
-                    .stage = {.stage = vk::ShaderStageFlagBits::eCompute,
-                              .module = module,
-                              .pName = "main"},
-                    .layout = *p.layout,
-                }));
+        p.pipeline = CreateComputePipeline(device, module, *p.layout);
         device.destroyShaderModule(module);
         return p;
     }();

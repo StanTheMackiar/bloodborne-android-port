@@ -51,7 +51,9 @@ fi
 [ -p "$base/audio.fifo" ] && export BB_AUDIO_FIFO="$base/audio.fifo"
 export BB_PRESENT_SOCKET="$files/bbpresent.sock"
 export BB_SCREEN_W="${BB_SCREEN_W:-1280}" BB_SCREEN_H="${BB_SCREEN_H:-720}"
-mkdir -p "$HOME/.fex-emu" "$HOME/.cache/fex-emu" "$base/user" "$base/logs"
+mkdir -p "$HOME/.fex-emu" "$HOME/.cache/fex-emu" "$base/user" "$base/logs" "$base/logs/failed-shaders"
+# libbbgpu: SPIR-V of pipelines the driver rejects is written here (vk_shader_util.cpp).
+export BB_FAILED_SHADER_DIR="$base/logs/failed-shaders"
 cp "$base/fex-compatible.json" "$HOME/.fex-emu/Config.json"
 # Local overrides for this device (experiments, tuning): sourced last, not part of the bundle.
 [ -f "$base/bionic-local.sh" ] && . "$base/bionic-local.sh"

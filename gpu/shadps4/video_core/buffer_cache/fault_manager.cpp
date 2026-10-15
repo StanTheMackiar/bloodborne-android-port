@@ -78,7 +78,10 @@ FaultManager::FaultManager(const Vulkan::Instance& instance, Vulkan::Scheduler& 
         .stage = shader_ci,
         .layout = *fault_process_pipeline_layout,
     };
-    fault_process_pipeline = Vulkan::Check(device.createComputePipelineUnique({}, pipeline_info));
+    auto fault_rv = device.createComputePipelineUnique({}, pipeline_info);
+    Vulkan::ReportPipelineFailure("fault_buffer_parser", fault_rv.result,
+                                  std::span{&shader_ci, 1});
+    fault_process_pipeline = Vulkan::Check(std::move(fault_rv));
     Vulkan::SetObjectName(device, *fault_process_pipeline, "Fault Buffer Parser Pipeline");
 
     device.destroyShaderModule(module);

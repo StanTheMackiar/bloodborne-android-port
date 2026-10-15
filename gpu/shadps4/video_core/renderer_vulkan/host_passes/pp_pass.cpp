@@ -163,8 +163,10 @@ void PostProcessingPass::Create(vk::Device device, const vk::Format surface_form
         .layout = *pipeline_layout,
     };
 
-    pipeline = Check<"create post process pipeline">(device.createGraphicsPipelineUnique(
-        /*pipeline_cache*/ {}, pipeline_info));
+    auto pipeline_rv = device.createGraphicsPipelineUnique(/*pipeline_cache*/ {}, pipeline_info);
+    ReportPipelineFailure("post_process", pipeline_rv.result,
+                          std::span<const vk::PipelineShaderStageCreateInfo>{shaders_ci});
+    pipeline = Check<"create post process pipeline">(std::move(pipeline_rv));
 
     // Once pipeline is compiled, we don't need the shader module anymore
     device.destroyShaderModule(vs_module);

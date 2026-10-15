@@ -82,13 +82,7 @@ OcclusionQueries::OcclusionQueries(const Instance& instance_, Scheduler& schedul
         .pPushConstantRanges = &range,
     }));
     const auto module = CompileSPV(OCCLUSION_RESOLVE_COMP, device);
-    pipeline = Check(device.createComputePipelineUnique(
-        {}, vk::ComputePipelineCreateInfo{
-                .stage = {.stage = vk::ShaderStageFlagBits::eCompute,
-                          .module = module,
-                          .pName = "main"},
-                .layout = *pipeline_layout,
-            }));
+    pipeline = CreateComputePipeline(device, module, *pipeline_layout);
     device.destroyShaderModule(module);
     std::printf("GPU: the game's occlusion queries are Vulkan occlusion queries (%s counts)\n",
                 instance.IsOcclusionQueryPrecise() ? "exact" : "approximate");

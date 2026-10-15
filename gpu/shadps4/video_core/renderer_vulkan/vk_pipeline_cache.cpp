@@ -1055,9 +1055,11 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
         module = CompileSPV(spv, instance.GetDevice());
     }
 
+    const auto name = GetShaderName(info.hw_stage, info.pgm_hash, perm_idx);
+    Vulkan::RegisterModuleSpirv(module, is_patched ? std::span<const u32>{*patch} : std::span<const u32>{spv},
+                                name);
     RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx);
 
-    const auto name = GetShaderName(info.hw_stage, info.pgm_hash, perm_idx);
     Vulkan::SetObjectName(instance.GetDevice(), module, name);
     if (EmulatorSettings.IsShaderCollect()) {
         DebugState.CollectShader(name, info.sw_stage, module, spv, code,

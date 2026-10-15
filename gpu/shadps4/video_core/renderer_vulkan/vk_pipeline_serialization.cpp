@@ -295,6 +295,8 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
         if (result != vk::Result::eSuccess) {
             throw Serialization::CorruptData{"cached SPIR-V rejected by the driver"};
         }
+        Vulkan::RegisterModuleSpirv(created, spv,
+                                    fmt::format("cached shader {:#x} perm {}", program->info.pgm_hash, perm_idx));
         return created;
     };
 

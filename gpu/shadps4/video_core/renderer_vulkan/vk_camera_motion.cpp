@@ -111,13 +111,7 @@ CameraMotion::CameraMotion(const Instance& instance_, Scheduler& scheduler_,
             .pPushConstantRanges = &range,
         }));
         const auto motion_module = CompileSPV(CAMERA_MOTION_COMP, device);
-        motion_pipeline = Check(device.createComputePipelineUnique(
-            {}, vk::ComputePipelineCreateInfo{
-                    .stage = {.stage = vk::ShaderStageFlagBits::eCompute,
-                              .module = motion_module,
-                              .pName = "main"},
-                    .layout = *motion_pipeline_layout,
-                }));
+        motion_pipeline = CreateComputePipeline(device, motion_module, *motion_pipeline_layout);
         device.destroyShaderModule(motion_module);
     }
     if (!debug_overlay) {
@@ -158,13 +152,7 @@ CameraMotion::CameraMotion(const Instance& instance_, Scheduler& scheduler_,
         .pPushConstantRanges = &push_range,
     }));
     const auto module = CompileSPV(CAMERA_MOTION_DEBUG_COMP, device);
-    overlay_pipeline = Check(device.createComputePipelineUnique(
-        {}, vk::ComputePipelineCreateInfo{
-                .stage = {.stage = vk::ShaderStageFlagBits::eCompute,
-                          .module = module,
-                          .pName = "main"},
-                .layout = *pipeline_layout,
-            }));
+    overlay_pipeline = CreateComputePipeline(device, module, *pipeline_layout);
     device.destroyShaderModule(module);
     for (auto& frame : frames) {
         frame = std::make_unique<VideoCore::Buffer>(instance, 0, 3840ull * 2160 * 4,

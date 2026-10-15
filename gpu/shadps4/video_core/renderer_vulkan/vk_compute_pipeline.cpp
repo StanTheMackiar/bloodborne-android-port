@@ -5,6 +5,7 @@
 
 #include "common/serdes.h"
 #include "shader_recompiler/info.h"
+#include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -109,6 +110,8 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
     };
     auto [pipeline_result, pipe] =
         instance.GetDevice().createComputePipelineUnique(pipeline_cache, compute_pipeline_ci);
+    ReportPipelineFailure(fmt::format("compute {}", debug_str), pipeline_result,
+                          std::span{&shader_ci, 1});
     if (preloading && pipeline_result != vk::Result::eSuccess) {
         // bbport: a pipeline from the cache the driver rejects is a damaged cache entry: the
         // cache is rebuilt (PipelineCache::WarmUp) instead of stopping the game at every start.
