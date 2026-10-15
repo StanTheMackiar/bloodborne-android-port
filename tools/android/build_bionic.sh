@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Bionic (Android NDK) build of the native game process: libbbcpu.so (FEXCore), libbbgpu.so
-# (GPU/HLE), bb-probe (runtime executable), kgsl-chip-id, bb-prepare. Phase 1 of the glibc -> Bionic port:
-# everything compiles and links for Bionic; nothing here is run on a device yet.
+# Bionic (Android NDK) build of the native game process, the Android app's only runtime: libbbcpu.so
+# (FEXCore), libbbgpu.so (GPU/HLE), bb-probe (runtime executable), kgsl-chip-id, bb-prepare (game
+# preparation) and ps4-pkg-tool (PKG installs). Output: out/bionic/{bin,lib}; build_release_runtime.py
+# packages them.
 # Prerequisite: tools/android/build_bionic_deps.sh (NDK + third-party libraries).
 # STL: c++_shared for all components (libbbcpu/libbbgpu/bb-probe share one libc++_shared.so; static
 # libc++ in several DSOs would give each its own exception/RTTI/new state).
@@ -58,7 +59,7 @@ if [[ ! -f $out/gpu/build.ninja ]]; then
 fi
 run ninja -C "$out/gpu" -j "$J" bbgpu > "$out/gpu-build.log" 2>&1 || { grep -v '^\[' "$out/gpu-build.log" | tail -40 >&2; exit 1; }
 
-# Layout as the glibc app: bin/ and lib/ side by side, executables find lib/ through $ORIGIN.
+# bin/ and lib/ side by side, executables find lib/ through $ORIGIN.
 mkdir -p "$out/bin" "$out/lib"
 cp -f "$out/fex/libbbcpu.so" "$out/gpu/libbbgpu.so" "$out/lib/"
 # libSDL3.so only while libbbgpu still links it (the AHardwareBuffer present path removes that);
@@ -75,7 +76,7 @@ for source in third_party/LibAtrac9/C/src/*.c; do
     "${cc[@]}" -std=c99 -O2 -g -w -fPIC -c "$source" -o "$out/atrac9/$(basename "${source%.c}").o"
 done
 "$llvm/bin/llvm-ar" rcs "$out/libatrac9.a" "$out"/atrac9/*.o
-# PIE (Android requires it; the glibc build is -no-pie for its brk heap, see src/probe.c main),
+# PIE (Android requires it; the PC build is -no-pie for its brk heap, see src/probe.c main),
 # -rdynamic: libbbgpu resolves runtime_* symbols against the executable. Linked against the NDK
 # sysroot only: no libvulkan, no loader of ours.
 links=(-L"$out/lib" -lbbgpu -lbbcpu -Wl,-rpath,'$ORIGIN/../lib' -rdynamic -pie)
@@ -85,5 +86,7 @@ links=(-L"$out/lib" -lbbgpu -lbbcpu -Wl,-rpath,'$ORIGIN/../lib' -rdynamic -pie)
 "${cc[@]}" -std=c11 -O2 -Wall -Wextra -Werror tools/android/kgsl_chip_id.c -pie -o "$out/bin/kgsl-chip-id"
 # bb-prepare: the game-preparation step (port of prepare_game.py), no Python or rootfs on the device.
 tools/android/build_prepare.sh android
+# ps4-pkg-tool: unpacks PKGs for the app's game and mod installers (the app runs it from the runtime).
+tools/android/build_pkg_tool.sh android
 echo "Built $out/bin/bb-probe, $out/lib/libbbgpu.so, $out/lib/libbbcpu.so (Bionic, API $api)"
 tools/android/check_bionic_symbols.sh

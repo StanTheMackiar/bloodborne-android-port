@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Pre-compile the game patches the Thor's graphics settings can choose, one file per choice.
 
-The Thor has no Python: scripts/patches.py cannot run at each start as in run.sh. Its patches are
-compiled here instead, a BBPATCH2 file per effect switch, model LOD and scene resolution, and
-run-thor.sh passes the loader the files bbport.ini selects (the loader applies them in order).
+The Android runtime has no Python: scripts/patches.py cannot run at each start as in run.sh. Its
+patches are compiled here instead, a BBPATCH2 file per effect switch, model LOD and scene resolution
+(build_release_runtime.py puts them in the runtime archive as bbport/patch-parts), and run-bionic.sh
+passes the loader the files bbport.ini selects (the loader applies them in order).
 fps=uncap.bin: the frame rate patches for any limit above the game's 30.
 """
 import argparse
@@ -106,7 +107,7 @@ def main():
               patches.compile_patches(args.xml, [name], args.app_version, segments))
         count += 1
     # Above 30 FPS: the delta-time patch with the sprint fix (patches.FPS_PRESETS['uncap']); the
-    # present thread then limits the rate (BB_FPS_LIMIT, run-thor.sh).
+    # present thread then limits the rate (BB_FPS_LIMIT, run-bionic.sh).
     write(args.out / 'fps=uncap.bin',
           patches.compile_patches(args.xml, patches.FPS_PRESETS['uncap'], args.app_version, segments))
     count += 1

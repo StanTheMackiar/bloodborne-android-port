@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Third-party libraries for the Bionic (Android NDK) build, into .local-deps/android/bionic-prefix.
-# Versions are the ones the glibc build gets from the Debian trixie sysroot (fetch_arm64_sysroot.py).
+# Versions match the Debian trixie ones the former glibc Android build used (and the PC build).
 # Sources are downloaded to .local-deps/android/bionic-src, builds go to bionic-build.
 # Host-side prerequisites: curl, tar, cmake, ninja, make, python3.
 set -euo pipefail

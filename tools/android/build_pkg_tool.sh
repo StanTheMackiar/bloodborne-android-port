@@ -2,13 +2,11 @@
 # ps4-pkg-tool (github.com/xXJSONDeruloXx/ps4-pkg-tools at 45baeda: shadPS4's PKG/PFS code, GPL-2.0),
 # the CLI that unpacks PS4 fake PKGs for the app's mod installer (PkgInstaller in the frontend; before: mods_android.py install-pkg).
 # Built out of tree from the (read-only) source:
-#   arm64 -> out/arm64/pkg-tool/ps4-pkg-tool  (also copied to out/arm64/bundle/bin/ when that exists;
-#            build_release_runtime.py bundles it as bbport/arm64/bin/ps4-pkg-tool)
 #   android -> out/bionic/bin/ps4-pkg-tool    (NDK, API 30, static libc++/zlib/cryptopp: NEEDED only Bionic's
-#            libc/libm/libdl; the app's PKG installs run it from files/bbport/bionic/bin/)
+#            libc/libm/libdl; build_release_runtime.py bundles it, the app's PKG installs run it from
+#            files/bbport/bionic/bin/; build_bionic.sh builds it)
 #   host  -> out/host/pkg-tool/ps4-pkg-tool   (tests/test_mods_android.py, tests/android-mods)
-# Usage: tools/android/build_pkg_tool.sh [arm64|android|host|all]   (default: all = arm64 + host; android
-#        is built by name: the glibc arm64 target goes away with the rootfs)
+# Usage: tools/android/build_pkg_tool.sh [android|host|all]   (default: all)
 # Our patches (tools/android/pkg-tool-patches: byte progress, 64-bit offsets for multi-GB PKGs) are
 # applied to a copy of the source in out/pkg-tool-src; the original is never touched.
 # Source: $BB_PKG_TOOL_SRC, else .local-deps/src/ps4-pkg-tools (here or in the main checkout).
@@ -39,12 +37,6 @@ for patch in "$root"/tools/android/pkg-tool-patches/*.patch; do
     patch -d "$copy" -p1 -s < "$patch" || { echo "Patch failed: $patch" >&2; exit 1; }
 done
 src=$copy
-sysroot=${BB_ARM64_SYSROOT:-$root/.local-deps/android/arm64-sysroot}
-toolchain=$root/tools/android/aarch64-toolchain.cmake
-# Android has no /lib: the interpreter is the fexdroid rootfs's, by absolute path (as bb-probe).
-rootfs=${BB_THOR_ROOTFS:-/data/data/com.ducvd89.bloodborne/files/rootfs}
-interpreter=$rootfs/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1
-
 # The tool prints "Progress: N / M files" with plain "\n": linked into a pipe, stdout would be
 # block-buffered and the app would see nothing until the end. This object (linked into the
 # executable, run before main) makes stdout line-buffered.
@@ -59,28 +51,6 @@ C
     echo "$dir/linebuf.o"
 }
 
-build_arm64() {
-    [[ -f $sysroot/usr/lib/aarch64-linux-gnu/libc.so.6 ]] || { echo "No sysroot: $sysroot" >&2; exit 1; }
-    local out=$root/out/arm64/pkg-tool build=$root/out/arm64/pkg-tool-build
-    local cc=(clang --target=aarch64-linux-gnu --sysroot="$sysroot")
-    local object; object=$(shim "$build" "${cc[@]}")
-    # Static: the vendored cryptopp, the sysroot's zlib (libz.a), libstdc++ and libgcc. Only libc, libm
-    # (and the dynamic loader) stay dynamic, which the rootfs has.
-    cmake -S "$src" -B "$build" -G Ninja -DCMAKE_TOOLCHAIN_FILE="$toolchain" -DCMAKE_BUILD_TYPE=Release \
-        -DBUILD_PKG_QT_GUI=OFF -DCRYPTOPP_BUILD_TESTING=OFF \
-        -DZLIB_LIBRARY="$sysroot/usr/lib/aarch64-linux-gnu/libz.a" -DZLIB_INCLUDE_DIR="$sysroot/usr/include" \
-        "-DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld -no-pie -static-libstdc++ -static-libgcc -Wl,--dynamic-linker=$interpreter $object" \
-        >"$build/cmake.log" 2>&1 || { tail -30 "$build/cmake.log" >&2; exit 1; }
-    run ninja -C "$build" -j "$jobs" ps4-pkg-tool >"$build/build.log" 2>&1 || { tail -40 "$build/build.log" >&2; exit 1; }
-    mkdir -p "$out"
-    cp "$build/ps4-pkg-tool" "$out/ps4-pkg-tool"
-    llvm-strip --strip-all "$out/ps4-pkg-tool"
-    if [[ -d $root/out/arm64/bundle/bin ]]; then
-        cp "$out/ps4-pkg-tool" "$root/out/arm64/bundle/bin/ps4-pkg-tool"
-    fi
-    echo "Built $out/ps4-pkg-tool (aarch64)"
-}
-
 # Android (Bionic): the NDK toolchain as build_bionic.sh, libc++ linked statically (a standalone tool,
 # no libc++_shared.so beside it), the NDK's own libz.a, the vendored cryptopp.
 build_android() {
@@ -89,7 +59,7 @@ build_android() {
     [[ -f $ndk/build/cmake/android.toolchain.cmake ]] || { echo "No NDK: $ndk (tools/android/build_bionic_deps.sh)" >&2; exit 1; }
     local out=$root/out/bionic/bin build=$root/out/bionic/pkg-tool-build
     local object; object=$(shim "$build" "$llvm/bin/aarch64-linux-android$api-clang")
-    # pkg.cpp includes zlib by an absolute host path (the glibc build used the host's header): the NDK's own.
+    # pkg.cpp includes zlib by an absolute host path (the host build uses the host's header): the NDK's own.
     sed -i 's|</usr/include/zlib.h>|<zlib.h>|' "$src/src/core/file_format/pkg.cpp"
     local zlib=$llvm/sysroot/usr/lib/aarch64-linux-android/libz.a
     [[ -f $zlib ]] || { echo "No libz.a in the NDK: $zlib" >&2; exit 1; }
@@ -119,9 +89,8 @@ build_host() {
 }
 
 case $which in
-    arm64) build_arm64 ;;
     android) build_android ;;
     host) build_host ;;
-    all) build_arm64; build_host ;;
-    *) echo 'usage: build_pkg_tool.sh [arm64|android|host|all]' >&2; exit 2 ;;
+    all) build_android; build_host ;;
+    *) echo 'usage: build_pkg_tool.sh [android|host|all]' >&2; exit 2 ;;
 esac
