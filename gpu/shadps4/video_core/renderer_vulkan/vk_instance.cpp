@@ -250,6 +250,9 @@ bool Instance::CreateDevice() {
     vk11_props = properties_chain.get<vk::PhysicalDeviceVulkan11Properties>();
     vk12_props = properties_chain.get<vk::PhysicalDeviceVulkan12Properties>();
     vk13_props = properties_chain.get<vk::PhysicalDeviceVulkan13Properties>();
+    std::printf("GPU subgroup sizes %u..%u, required-size stages %#x\n",
+                vk13_props.minSubgroupSize, vk13_props.maxSubgroupSize,
+                static_cast<u32>(vk13_props.requiredSubgroupSizeStages));
     push_descriptor_props = properties_chain.get<vk::PhysicalDevicePushDescriptorPropertiesKHR>();
     LOG_INFO(Render_Vulkan, "Physical device subgroup size {}", vk11_props.subgroupSize);
 
