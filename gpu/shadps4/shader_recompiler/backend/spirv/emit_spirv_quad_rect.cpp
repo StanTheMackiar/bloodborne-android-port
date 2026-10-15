@@ -12,8 +12,8 @@ using Sirit::Id;
 constexpr u32 SPIRV_VERSION_1_5 = 0x00010500;
 
 struct QuadRectListEmitter : public Sirit::Module {
-    explicit QuadRectListEmitter(const HwFragmentRuntimeInfo& fs_info_)
-        : Sirit::Module{SPIRV_VERSION_1_5}, fs_info{fs_info_} {
+    explicit QuadRectListEmitter(const HwFragmentRuntimeInfo& fs_info_, u32 vs_param_mask_)
+        : Sirit::Module{SPIRV_VERSION_1_5}, fs_info{fs_info_}, vs_param_mask{vs_param_mask_} {
         void_id = TypeVoid();
         bool_id = TypeBool();
         float_id = TypeFloat(32);
@@ -25,6 +25,7 @@ struct QuadRectListEmitter : public Sirit::Module {
         vec4_id = TypeVector(float_id, 4);
 
         float_one = Constant(float_id, 1.0f);
+        vec4_zero = ConstantNull(vec4_id);
         float_min_one = Constant(float_id, -1.0f);
         int_zero = Constant(int_id, 0);
 
@@ -117,6 +118,10 @@ struct QuadRectListEmitter : public Sirit::Module {
 
         // Set attributes
         for (int i = 0; i < inputs.size(); i++) {
+            if (!Sirit::ValidId(inputs[i])) {
+                OpStore(OpAccessChain(output_vec4, outputs[i], invocation_id), vec4_zero);
+                continue;
+            }
             // vec4 in_paramN3 = interpolate(bary_coord, in_paramN[0], in_paramN[1], in_paramN[2]);
             const Id v0{OpLoad(vec4_id, OpAccessChain(input_vec4, inputs[i], Int(0)))};
             const Id v1{OpLoad(vec4_id, OpAccessChain(input_vec4, inputs[i], Int(1)))};
@@ -163,7 +168,9 @@ struct QuadRectListEmitter : public Sirit::Module {
 
         for (int i = 0; i < inputs.size(); i++) {
             // out_paramN[gl_InvocationID] = in_paramN[gl_InvocationID];
-            const Id in_param{OpLoad(vec4_id, OpAccessChain(input_vec4, inputs[i], index))};
+            const Id in_param{Sirit::ValidId(inputs[i])
+                                  ? OpLoad(vec4_id, OpAccessChain(input_vec4, inputs[i], index))
+                                  : vec4_zero};
             OpStore(OpAccessChain(output_vec4, outputs[i], invocation_id), in_param);
         }
 
@@ -282,6 +289,13 @@ private:
             if (input.IsDefault()) {
                 continue;
             }
+            // bbport: the control shader reads only what the vertex shader writes (an input
+            // without a matching output is invalid; the stock Adreno driver fails to link).
+            if (model == spv::ExecutionModel::TessellationControl &&
+                (input.param_index >= 32 || !((vs_param_mask >> input.param_index) & 1U))) {
+                inputs.emplace_back();
+                continue;
+            }
             inputs.emplace_back(AddInput(float_arr));
             Decorate(inputs.back(), spv::Decoration::Location, input.param_index);
         }
@@ -289,6 +303,7 @@ private:
 
 private:
     HwFragmentRuntimeInfo fs_info;
+    u32 vs_param_mask;
     Id main;
     Id void_id;
     Id bool_id;
@@ -302,6 +317,7 @@ private:
     Id float_one;
     Id float_min_one;
     Id int_zero;
+    Id vec4_zero;
     Id gl_per_vertex_type;
     Id gl_in;
     union {
@@ -319,8 +335,9 @@ private:
     std::vector<Id> interfaces;
 };
 
-std::vector<u32> EmitAuxilaryTessShader(AuxShaderType type, const HwFragmentRuntimeInfo& fs_info) {
-    QuadRectListEmitter ctx{fs_info};
+std::vector<u32> EmitAuxilaryTessShader(AuxShaderType type, const HwFragmentRuntimeInfo& fs_info,
+                                        u32 vs_param_mask) {
+    QuadRectListEmitter ctx{fs_info, vs_param_mask};
     switch (type) {
     case AuxShaderType::RectListTCS:
         ctx.EmitRectListTCS();

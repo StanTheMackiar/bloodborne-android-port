@@ -196,7 +196,17 @@ GraphicsPipeline::GraphicsPipeline(
         const auto type = is_quad_list ? AuxShaderType::QuadListTCS : AuxShaderType::RectListTCS;
         if (!preloading) {
             const auto& fs_info = runtime_infos[u32(Shader::SwStage::Fragment)].hw.fs;
-            sdata.tcs = Shader::Backend::SPIRV::EmitAuxilaryTessShader(type, fs_info);
+            // The parameters the vertex shader writes: the control shader may read no others.
+            u32 vs_param_mask = ~0U;
+            if (const auto* vs_info = infos[u32(Shader::SwStage::Vertex)]) {
+                vs_param_mask = 0;
+                for (u32 i = 0; i < Shader::IR::NumParams; ++i) {
+                    if (vs_info->stores.GetAny(Shader::IR::Attribute::Param0 + i)) {
+                        vs_param_mask |= 1U << i;
+                    }
+                }
+            }
+            sdata.tcs = Shader::Backend::SPIRV::EmitAuxilaryTessShader(type, fs_info, vs_param_mask);
         }
         shader_stages.emplace_back(vk::PipelineShaderStageCreateInfo{
             .stage = vk::ShaderStageFlagBits::eTessellationControl,
