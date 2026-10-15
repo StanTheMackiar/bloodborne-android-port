@@ -32,7 +32,9 @@
 #include <string.h>
 #include <pthread.h>
 #include <time.h>
+#ifndef BB_NO_SDL
 #include <SDL3/SDL.h>
+#endif
 #include <sys/stat.h>
 #include <math.h>
 
@@ -75,11 +77,17 @@ _Static_assert(__builtin_offsetof(PadData,timestamp)==80,"OrbisPadData timestamp
 _Static_assert(sizeof(ControllerInfo)==28,"OrbisPadControllerInformation layout");
 
 static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
-static int initialized, opened, sdl_ready;
+static int initialized, opened;
+#ifndef BB_NO_SDL
+static int sdl_ready;
 static SDL_Gamepad *gamepad;
+#endif
 static size_t reads;
 static uint8_t connected_count;
 
+/* Android (BB_NO_SDL): no SDL gamepad, keyboard or mouse; BB_PAD_FILE (the app's state) is the input. */
+static uint64_t now_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return (uint64_t)t.tv_sec*1000000u+(uint64_t)t.tv_nsec/1000u; }
+#ifndef BB_NO_SDL
 /* Per-controller stick neutral (see the file header): the value each axis holds while the
  * sticks are untouched, taken from a quiet window after the pad opens. Works for any pad; a
  * genuine one settles at 0 and the subtraction is a no-op. */
@@ -95,7 +103,6 @@ static int cal_base[4];                /* 0: normal pad; else |neutral| of a bia
 static int cal_max[4][2];              /* largest push seen per direction on a biased axis */
 static uint64_t cal_since;
 
-static uint64_t now_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return (uint64_t)t.tv_sec*1000000u+(uint64_t)t.tv_nsec/1000u; }
 static uint8_t trigger(int16_t v) { int x=v>>7; return (uint8_t)(x<0 ? 0 : x>255 ? 255 : x); }
 static void cal_load(void) {
     static int loaded;
@@ -199,12 +206,14 @@ static uint8_t stick_axis(int axis,int16_t raw) {
 static uint16_t touch_axis(float v, int max) {
     return (uint16_t)(v<=0.0f ? 0 : v>=1.0f ? max : (int)(v*max+0.5f));
 }
+#endif
 static void touch_click(PadData *d, int right) {
     d->buttons|=BTN_TOUCHPAD;
     d->touch_count=1;
     d->touches[0]=(PadTouch){.x=right ? 1440 : 480,.y=471,.id=0};
 }
 
+#ifndef BB_NO_SDL
 /* BB_GAMEPAD (the launcher's controller choice): its SDL GUID, or part of its name. Issue #15:
  * wheels and other controllers connected for good came first. */
 static const char *preferred_gamepad(void) {
@@ -250,6 +259,7 @@ static SDL_Gamepad *current_gamepad(void) {
     }
     return gamepad;
 }
+#endif
 /* bbport (frame stats): the game's libc heap, read every 5 s from a game thread (it reads the pad)
  * with libc.prx's malloc_stats (export stub at libc.prx+0x1f8c0; malloc_stats_fast returns 1 in this libc, the module at image +0x56e0000):
  * in use now and at most, and what it took from the system. A heap that keeps growing is a leak. */
@@ -272,6 +282,9 @@ static void report_guest_heap(void) {
                m.in_use/1048576.0,m.max_in_use/1048576.0,m.system/1048576.0,m.max_system/1048576.0);
     }
 }
+static float mouse_sensitivity=0.10f;
+static int mouse_invert_y;
+#ifndef BB_NO_SDL
 /* Controls: what each PS4 input is bound to. Defaults below; bbport.ini (BB_CONFIG) lines
  * key.<input>=<SDL key names> and pad.<input>=<SDL gamepad button names>, comma-separated,
  * replace an input's binding (empty: unbound). Inputs: the buttons (cross ... right, touchpad =
@@ -302,8 +315,6 @@ enum { PAD_LEFT_TRIGGER=SDL_GAMEPAD_BUTTON_COUNT, PAD_RIGHT_TRIGGER }; /* trigge
 typedef struct { int key_count, pad_count; SDL_Scancode keys[MAX_BIND]; int pad[MAX_BIND]; uint32_t mouse; } Binding;
 static Binding bindings[IN_COUNT];
 static int bindings_ready;
-static float mouse_sensitivity=0.10f;
-static int mouse_invert_y;
 
 static uint32_t mouse_button_from_name(const char *name) {
     static const struct { const char *name; int button; } names[]={
@@ -429,6 +440,7 @@ static void apply_keyboard(PadData *d, const bool *k, uint32_t mouse) {
     d->right_y=key_axis(d->right_y,key_down(k,mouse,IN_LOOK_UP),key_down(k,mouse,IN_LOOK_DOWN));
 }
 
+#endif
 /* Bloodborne still receives a right stick: lift nonzero movement past its dead zone,
  * then scale velocity. Do not consume motion here: the game may read pad state many times. */
 static uint8_t mouse_axis(float speed) {
@@ -449,12 +461,15 @@ static void sample_host(PadData *d) {
     d->orientation[3]=1.0f;
     d->connected=1; d->connected_count=connected_count ? connected_count : 1;
     d->timestamp=now_us();
+#ifndef BB_NO_SDL
     SDL_Gamepad *g=current_gamepad();
     if (!bindings_ready) { load_bindings(); bindings_ready=1; }
+#endif
     if (bbgpu_overlay_captures_input()) return; /* settings menu open: neutral input */
     BbMouseState mouse;
     bbgpu_mouse_state(&mouse);
     if (!mouse.focused) return;
+#ifndef BB_NO_SDL
     const bool *k=SDL_WasInit(SDL_INIT_VIDEO) ? SDL_GetKeyboardState(NULL) : NULL;
     if (g) {
         int touch_right=0;
@@ -490,6 +505,7 @@ static void sample_host(PadData *d) {
         if (touch_right) touch_click(d,1);
     }
     if (k) apply_keyboard(d,k,mouse.buttons);
+#endif
     apply_mouse(d,&mouse);
 }
 
@@ -554,9 +570,14 @@ static PadSample record_last;
 static void record_sample(const PadData *d) {
     static const char *path; static int checked, f9_was_down;
     if (!checked) { path=getenv("BB_PAD_RECORD"); checked=1; }
+#ifdef BB_NO_SDL
+    (void)f9_was_down; if (!path || !*path) return;
+    const int f9=0;
+#else
     if (!path || !*path || !sdl_ready) return;
     const bool *k=SDL_GetKeyboardState(NULL);
     const int f9=k && k[SDL_SCANCODE_F9];
+#endif
     if (f9 && !f9_was_down) {
         if (record_file) {
             fclose(record_file); record_file=NULL;
@@ -661,7 +682,11 @@ static ABI int32_t pad_open(int32_t user, int32_t type, int32_t index, const voi
     int already=opened; opened=1;
     pthread_mutex_unlock(&lock);
     if (already) return ERR_ALREADY_OPENED;
+    #ifdef BB_NO_SDL
+    puts("Runtime: pad opened for user 1 (the app's pad file)");
+#else
     puts("Runtime: pad opened for user 1 (SDL gamepad or keyboard)");
+#endif
     return PAD_HANDLE;
 }
 static ABI int32_t pad_close(int32_t handle) {
@@ -691,7 +716,9 @@ static ABI int32_t pad_info(int32_t handle, ControllerInfo *info) {
     info->dead_zone_left=info->dead_zone_right=2;
     info->connection_type=0; info->connected=1; info->device_class=0;
     pthread_mutex_lock(&lock);
+#ifndef BB_NO_SDL
     current_gamepad();
+#endif
     info->connected_count=connected_count ? connected_count : 1;
     pthread_mutex_unlock(&lock);
     return 0;
@@ -699,10 +726,12 @@ static ABI int32_t pad_info(int32_t handle, ControllerInfo *info) {
 static ABI int32_t pad_vibration(int32_t handle, const uint8_t *param) {
     if (handle!=PAD_HANDLE || !opened) return ERR_INVALID_HANDLE;
     if (!param) return ERR_INVALID_ARG;
+#ifndef BB_NO_SDL
     pthread_mutex_lock(&lock);
     SDL_Gamepad *g=current_gamepad();
     if (g) SDL_RumbleGamepad(g,(uint16_t)(param[0]*257),(uint16_t)(param[1]*257),1000);
     pthread_mutex_unlock(&lock);
+#endif
     return 0;
 }
 static ABI int32_t pad_ok_handle(int32_t handle) { return handle==PAD_HANDLE && opened ? 0 : ERR_INVALID_HANDLE; }
@@ -717,4 +746,8 @@ static const RuntimeExport exports[]={
     {"scePadSetMotionSensorState",pad_ok_handle_flag},
 };
 uintptr_t runtime_pad_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }
+#ifdef BB_NO_SDL
+void runtime_pad_report(void) { printf("Runtime: pad reads=%zu\n",reads); }
+#else
 void runtime_pad_report(void) { printf("Runtime: pad reads=%zu, gamepad=%s\n",reads,gamepad ? SDL_GetGamepadName(gamepad) : "none"); }
+#endif
