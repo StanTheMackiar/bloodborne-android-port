@@ -10,7 +10,7 @@
 #include <cstring>
 #include <string>
 #include <dlfcn.h>
-#include <execinfo.h>
+#include "bbport_backtrace.h"
 #include <unistd.h>
 #include <functional>
 
@@ -64,8 +64,8 @@ void ReportProducer(const char* what, u32 other, const char* other_where, const 
                  what, self, ThreadName(self).c_str(), where, other, ThreadName(other).c_str(),
                  other_where ? other_where : "?");
     void* frames[24];
-    const int depth = backtrace(frames, 24);
-    backtrace_symbols_fd(frames, depth, 2);
+    const int depth = bb_backtrace(frames, 24);
+    bb_backtrace_symbols_fd(frames, depth, 2);
 }
 } // namespace
 
@@ -458,7 +458,7 @@ void TraceHoist(const char* what) {
     std::string key = what;
     if (what[0] == 'c') { // "closed early": the call stack
         void* frames[8];
-        const int count = backtrace(frames, 8);
+        const int count = bb_backtrace(frames, 8);
         for (int i = 2; i < count; ++i) {
             Dl_info info{};
             dladdr(frames[i], &info);

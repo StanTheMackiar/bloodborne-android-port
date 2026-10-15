@@ -11,7 +11,7 @@
 #include <string>
 #include <vector>
 #include <dlfcn.h>
-#include <execinfo.h>
+#include "bbport_backtrace.h"
 #include <pthread.h>
 
 namespace BbWaitTrace {
@@ -70,7 +70,7 @@ Scope::Scope() {
     if (!Enabled()) {
         return;
     }
-    depth = backtrace(frames, int(std::size(frames)));
+    depth = bb_backtrace(frames, int(std::size(frames)));
     start = std::chrono::steady_clock::now();
 }
 

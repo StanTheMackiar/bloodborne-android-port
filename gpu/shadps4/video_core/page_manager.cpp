@@ -47,9 +47,9 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <sys/syscall.h>
-#else
-#include "common/spin_lock.h"
 #endif
+// bbport: Bionic has no PTHREAD_ADAPTIVE_MUTEX_INITIALIZER_NP: LockType falls back to SpinLock.
+#include "common/spin_lock.h"
 
 extern "C" void runtime_memory_set_write_watch(uintptr_t address, uint64_t size, int watch);
 extern "C" int runtime_memory_vma_info(uintptr_t address, int* prot, int* type, uintptr_t* end);
