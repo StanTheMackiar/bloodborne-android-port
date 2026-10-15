@@ -144,7 +144,13 @@ void UniqueBuffer::Create(vk::BufferCreateInfo& buffer_ci, MemoryType mem_type,
             buffer_ci.pNext = nullptr;
         }
         if (!buffer) {
-            buffer = Vulkan::Check(device.createBuffer(buffer_ci));
+            const auto created = device.createBuffer(buffer_ci);
+            if (created.result != vk::Result::eSuccess) {
+                std::printf("Sparse buffer of %llu bytes failed: %s\n",
+                            static_cast<unsigned long long>(buffer_ci.size),
+                            vk::to_string(created.result).c_str());
+            }
+            buffer = Vulkan::Check(created);
         }
     }
 
