@@ -58,10 +58,17 @@ cp "$base/fex-compatible.json" "$HOME/.fex-emu/Config.json"
 cd "$base"
 [ -x "$bionic/bin/bb-probe" ] || { echo "The Bionic runtime is missing: $bionic" >&2; exit 2; }
 # The game files and the mods overlay come from the rootfs's Python, still with the app's glibc paths.
-[ "${1:-game}" = game ] && bb_prepare_game
-# From here on the glibc libraries of the app's own LD_LIBRARY_PATH must not reach a Bionic process.
+if [ "${1:-game}" = game ]; then
+    bb_prepare_game
+    parts="$base/arm64/patch-parts"
+    [ -d "$parts" ] || { echo "The patches are missing: $parts" >&2; exit 2; }
+    bb_patch_args
+fi
+# From here on the glibc libraries of the app's own LD_LIBRARY_PATH must not reach a Bionic process,
+# so the rootfs's glibc tools (sed, tail: setting()) no longer run: use Android's own first.
 LD_LIBRARY_PATH="$bionic/lib"; export LD_LIBRARY_PATH
 unset LD_PRELOAD
+PATH="/system/bin:$PATH"
 case ${1:-game} in
     vulkan)
         exec "$bionic/bin/bb-probe" --vulkan-only
@@ -70,9 +77,6 @@ case ${1:-game} in
         set -- "$bionic/bin/bb-probe"
         # BB_THOR_CPUS: the CPUs the game may run on (taskset -c list), e.g. 3-7 big cores only.
         [ -n "${BB_THOR_CPUS:-}" ] && set -- /system/bin/taskset -c "$BB_THOR_CPUS" "$@"
-        parts="$base/arm64/patch-parts"
-        [ -d "$parts" ] || { echo "The patches are missing: $parts" >&2; exit 2; }
-        bb_patch_args
         set -- "$@" "$base/data/boot-linked.bin" $patch_args
         exec "$@" \
             --content-profile "$base/data/content.bin" \
