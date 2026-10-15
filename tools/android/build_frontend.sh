@@ -42,6 +42,16 @@ steam_libs=$PWD/.local-deps/android/steam-libs
 [[ -f $steam_libs/jars.txt ]] || bash tools/android/fetch_steam_libs.sh
 mapfile -t steam_jars < <(sed "s|^|$steam_libs/jars/|" "$steam_libs/jars.txt")
 mkdir -p "$out/lib/arm64-v8a" && cp "$steam_libs"/jni/*.so "$out/lib/arm64-v8a/"
+# libbbpresent.so: the Bionic game's frame path (AHardwareBuffers -> ASurfaceControl), built with the
+# NDK at minSdk 28 (the API 29 calls are looked up at run time). NEEDED: libandroid, liblog,
+# libnativewindow and libc/libm/libdl only.
+ndk=${BB_NDK:-$PWD/.local-deps/android/sdk/ndk/29.0.14206865}
+[[ -x $ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang ]] \
+    || { echo "No NDK: $ndk (tools/android/build_bionic_deps.sh)" >&2; exit 1; }
+"$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang" -fuse-ld=lld -std=c11 -O2 -g \
+    -Wall -Wextra -Werror -fPIC -shared -Wl,-soname,libbbpresent.so -Wl,-z,max-page-size=16384 \
+    -Itools/android/present tools/android/frontend/jni/bbpresent/bbpresent.c \
+    -landroid -llog -lnativewindow -o "$out/lib/arm64-v8a/libbbpresent.so"
 mapfile -t sources < <(rg --files tools/android/frontend/src -g '*.java')
 javac --release 8 -classpath "$android_jar:$(IFS=:; echo "${steam_jars[*]}")" -d "$out/classes" "${sources[@]}"
 mapfile -t classes < <(rg --files "$out/classes" -g '*.class')

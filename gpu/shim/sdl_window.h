@@ -7,7 +7,9 @@
 #include "common/types.h"
 #include "mouse_input.h"
 
+#ifndef __ANDROID__
 struct SDL_Window;
+#endif
 
 namespace Frontend {
 
@@ -20,6 +22,30 @@ struct WindowSystemInfo {
     WindowSystemType type = WindowSystemType::Headless;
 };
 
+#ifdef __ANDROID__
+/// Bionic: there is no window and no SDL. The game process has no Surface: frames go to the app
+/// through the AHB swapchain (vk_swapchain_ahb.cpp). This class only carries the output size
+/// (BB_SCREEN_W x BB_SCREEN_H from the launcher, 1920x1080 without them); input comes from the app
+/// through the runtime (src/runtime_pad.c), not from window events (window_android.cpp).
+class WindowSDL {
+public:
+    WindowSDL(s32 width, s32 height, const char* title);
+    s32 GetWidth() const { return width.load(std::memory_order_relaxed); }
+    s32 GetHeight() const { return height.load(std::memory_order_relaxed); }
+    WindowSystemInfo GetWindowInfo() const { return window_info; }
+    bool IsOpen() const { return true; }
+    /// Nothing to pump; returns true (the process ends with the app killing it).
+    bool PollEvents();
+    /// No keyboard dialog here: the text request is answered "cancelled" (state 2).
+    void BeginTextInput(const std::string& initial, const std::string& prompt);
+    int PollTextInput(std::string& text);
+    BbMouseState GetMouseState() { return {}; }
+
+private:
+    std::atomic<s32> width, height;
+    WindowSystemInfo window_info{};
+};
+#else
 class WindowSDL {
 public:
     WindowSDL(s32 width, s32 height, const char* title);
@@ -55,5 +81,6 @@ private:
     SDL_Window* window{};
     WindowSystemInfo window_info{};
 };
+#endif
 
 } // namespace Frontend

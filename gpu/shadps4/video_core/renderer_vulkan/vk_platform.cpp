@@ -3,7 +3,11 @@
 
 // Include the vulkan platform specific header
 #if defined(ANDROID) || defined(__ANDROID__)
+// bbport: Android has no surface; the platform define (the AHB types of vulkan.hpp) comes from the
+// build (gpu/CMakeLists.txt), the same for every translation unit.
+#ifndef VK_USE_PLATFORM_ANDROID_KHR
 #define VK_USE_PLATFORM_ANDROID_KHR
+#endif
 #elif defined(_WIN64)
 #define VK_USE_PLATFORM_WIN32_KHR
 #elif defined(__APPLE__)
@@ -61,23 +65,12 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL DebugUtilsCallback(
     return VK_FALSE;
 }
 
+#ifndef __ANDROID__
 vk::SurfaceKHR CreateSurface(vk::Instance instance, const Frontend::WindowSDL& emu_window) {
     const auto& window_info = emu_window.GetWindowInfo();
     vk::SurfaceKHR surface{};
 
-#if defined(VK_USE_PLATFORM_ANDROID_KHR)
-    if (window_info.type == Frontend::WindowSystemType::Android) {
-        // bbport: render_surface is the ANativeWindow (TODO(phase2): provided by the app).
-        const vk::AndroidSurfaceCreateInfoKHR android_ci = {
-            .window = static_cast<ANativeWindow*>(window_info.render_surface),
-        };
-        if (instance.createAndroidSurfaceKHR(&android_ci, nullptr, &surface) !=
-            vk::Result::eSuccess) {
-            LOG_CRITICAL(Render_Vulkan, "Failed to initialize Android surface");
-            UNREACHABLE();
-        }
-    }
-#elif defined(VK_USE_PLATFORM_WIN32_KHR)
+#if defined(VK_USE_PLATFORM_WIN32_KHR)
     if (window_info.type == Frontend::WindowSystemType::Windows) {
         const vk::Win32SurfaceCreateInfoKHR win32_ci = {
             .hinstance = nullptr,
@@ -137,6 +130,7 @@ vk::SurfaceKHR CreateSurface(vk::Instance instance, const Frontend::WindowSDL& e
 
     return surface;
 }
+#endif // !__ANDROID__
 
 static auto GetLayerExtensions(std::vector<const char*>&& extensions,
                                const std::vector<const char*>& layers) {
@@ -186,9 +180,7 @@ std::vector<const char*> GetInstanceExtensions(Frontend::WindowSystemType window
     case Frontend::WindowSystemType::Headless:
         break;
 #if defined(VK_USE_PLATFORM_ANDROID_KHR)
-    case Frontend::WindowSystemType::Android:
-        extensions.push_back(VK_KHR_ANDROID_SURFACE_EXTENSION_NAME);
-        break;
+    // bbport: no surface extension on Android (the AHB swapchain).
 #elif defined(VK_USE_PLATFORM_WIN32_KHR)
     case Frontend::WindowSystemType::Windows:
         extensions.push_back(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);

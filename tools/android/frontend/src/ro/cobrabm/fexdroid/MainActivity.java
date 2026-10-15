@@ -556,9 +556,13 @@ public final class MainActivity extends Activity {
             }
         }
     }
+    // TODO(merge): stub, the real one (bbport.ini runtime=) is on branch bionic-runtime; drop this.
+    static boolean bionicRuntime() { return false; }
     private void attach(SurfaceHolder holder) {
         if (destroyed || !holder.getSurface().isValid()) return;
-        String result=DisplayBridge.start(holder.getSurface(),ROOT+"/tmp/.fxshm/sock",shmid,60,ROOT+"/tmp/fxpresent.sock");
+        // Bionic runtime: frames arrive as AHardwareBuffers on a socket (BbPresent); no X server, no shmid.
+        String result=bionicRuntime() ? BbPresent.start(holder,getFilesDir()+"/bbpresent.sock")
+            : DisplayBridge.start(holder.getSurface(),ROOT+"/tmp/.fxshm/sock",shmid,60,ROOT+"/tmp/fxpresent.sock");
         android.util.Log.i("Bloodborne",result);
         if (!result.startsWith("bridge running:")) { error(result); return; }
         XInput.connect(0);
@@ -834,7 +838,7 @@ public final class MainActivity extends Activity {
         Process running=game;
         // A driver from a zip without this app's Mesa patches presents through X11, which the bridge
         // shows without counting it: the start text goes once that game has run for a while.
-        if (!hadError && (DisplayBridge.directFrames()>0 || customDriver && running!=null && running.isAlive()
+        if (!hadError && (DisplayBridge.directFrames()+BbPresent.framesIfLoaded()>0 || customDriver && running!=null && running.isAlive()
                 && android.os.SystemClock.uptimeMillis()-gameStartedAt>20000)) status.setVisibility(View.GONE);
         main.postDelayed(this::pollFrames,1000);
     }
