@@ -66,9 +66,11 @@ public:
 
 class BufferCache {
     static constexpr u64 ADDRESS_SPACE_BITS = 40;
-    static constexpr u64 ARENA_PAGE_BITS = 32;
-    static constexpr u64 ARENA_PAGE_SIZE = u64{1} << ARENA_PAGE_BITS;
-    static constexpr u64 NUM_ARENA_PAGES = u64{1} << (ADDRESS_SPACE_BITS - ARENA_PAGE_BITS);
+    /// bbport: the arena page (VA granule of one sparse arena buffer) is chosen at construction:
+    /// 4 GiB where the driver takes arenas of twice that (a request spanning two pages makes one
+    /// arena of two pages), smaller on drivers that refuse huge sparse buffers (Adreno stock).
+    static constexpr u64 MAX_ARENA_PAGE_BITS = 32;
+    static constexpr u64 MIN_ARENA_PAGE_BITS = 27; ///< 128 MiB
     static constexpr u64 MIN_BLOCK_SIZE = 16_KB;
 
 public:
@@ -467,7 +469,7 @@ private:
     std::unique_ptr<FaultManager> fault_manager;
     std::unique_ptr<Buffer> bda_pagetable_buffer;
 
-    std::array<const Buffer*, NUM_ARENA_PAGES> address_space{};
+    std::vector<const Buffer*> address_space; ///< num_arena_pages entries
     std::deque<Buffer> arenas;
     std::vector<ArenaBinds> pending_binds;
     std::mutex preupload_mutex;               ///< the map hooks come from guest threads
@@ -620,6 +622,10 @@ private:
     u32 last_evacuation = 0; ///< ProcessIdleBlocks: when a chunk was last emptied
     u32 block_size{};
     u32 block_shift{};
+    u32 arena_page_bits{MAX_ARENA_PAGE_BITS};
+    u64 arena_page_size{u64{1} << MAX_ARENA_PAGE_BITS};
+    u64 num_arena_pages{};
+    u64 max_arena_bytes{}; ///< the largest sparse buffer the driver was seen to create
     u32 blocks_per_arena_page{};
     u32 blocks_per_arena_page_shift{};
 };

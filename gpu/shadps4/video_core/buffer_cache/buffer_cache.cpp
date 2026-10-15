@@ -589,10 +589,72 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     const std::array<u32, 2> families = {instance.GetGraphicsQueueFamilyIndex(),
                                          instance.GetReadbackQueueFamilyIndex()};
     const bool shared = bool(instance.GetReadbackQueue()); // as Buffer creates the arenas
+    const auto device = instance.GetDevice();
+    {
+        // bbport: which sparse buffer sizes the driver takes (the stock Adreno driver refuses 4 GiB).
+        const auto make_ci = [&](u64 size) {
+            return vk::BufferCreateInfo{
+                .flags = vk::BufferCreateFlagBits::eSparseBinding |
+                         vk::BufferCreateFlagBits::eSparseResidency,
+                .size = size,
+                .usage = ARENA_USAGE,
+                .sharingMode = shared ? vk::SharingMode::eConcurrent : vk::SharingMode::eExclusive,
+                .queueFamilyIndexCount = shared ? 2u : 0u,
+                .pQueueFamilyIndices = shared ? families.data() : nullptr,
+            };
+        };
+        const auto pdev = instance.GetPhysicalDevice();
+        vk::PhysicalDeviceMaintenance3Properties m3;
+        vk::PhysicalDeviceMaintenance4Properties m4;
+        vk::PhysicalDeviceProperties2 props2;
+        props2.pNext = &m3;
+        m3.pNext = &m4;
+        pdev.getProperties2(&props2);
+        const auto& limits = props2.properties.limits;
+        std::printf("GPU limits: sparseAddressSpaceSize=%llu maxStorageBufferRange=%u "
+                    "maxMemoryAllocationCount=%u maxMemoryAllocationSize=%llu maxBufferSize=%llu\n",
+                    static_cast<unsigned long long>(limits.sparseAddressSpaceSize),
+                    limits.maxStorageBufferRange, limits.maxMemoryAllocationCount,
+                    static_cast<unsigned long long>(m3.maxMemoryAllocationSize),
+                    static_cast<unsigned long long>(m4.maxBufferSize));
+        const auto& mem = instance.GetMemoryProperties();
+        for (u32 i = 0; i < mem.memoryHeapCount; ++i) {
+            std::printf("GPU heap %u: %llu MiB flags=%#x\n", i,
+                        static_cast<unsigned long long>(mem.memoryHeaps[i].size >> 20),
+                        static_cast<u32>(mem.memoryHeaps[i].flags));
+        }
+        constexpr u64 probe_sizes[] = {8_GB, 4_GB, 2_GB, 1_GB, 512_MB, 256_MB, 128_MB};
+        max_arena_bytes = 0;
+        for (const u64 size : probe_sizes) {
+            const auto ci = make_ci(size);
+            const auto [result, probe] = device.createBuffer(ci);
+            std::printf("Sparse arena probe %llu MiB: %s\n",
+                        static_cast<unsigned long long>(size >> 20), vk::to_string(result).c_str());
+            if (result == vk::Result::eSuccess) {
+                device.destroyBuffer(probe);
+                max_arena_bytes = std::max(max_arena_bytes, size);
+            }
+        }
+        ASSERT_MSG(max_arena_bytes >= (u64{1} << MIN_ARENA_PAGE_BITS),
+                   "The driver takes no sparse buffer of 128 MiB or more");
+        arena_page_bits = std::min<u64>(MAX_ARENA_PAGE_BITS, std::bit_width(max_arena_bytes) - 1);
+        // A request over two pages makes one arena of two pages: keep it within what was seen to
+        // work. 4 GiB stays wherever it works (as before).
+        if (arena_page_bits < MAX_ARENA_PAGE_BITS && (u64{2} << arena_page_bits) > max_arena_bytes &&
+            arena_page_bits > MIN_ARENA_PAGE_BITS) {
+            --arena_page_bits;
+        }
+        arena_page_size = u64{1} << arena_page_bits;
+        num_arena_pages = u64{1} << (ADDRESS_SPACE_BITS - arena_page_bits);
+        address_space.assign(num_arena_pages, nullptr);
+        std::printf("Sparse arenas: page %llu MiB, largest buffer accepted %llu MiB\n",
+                    static_cast<unsigned long long>(arena_page_size >> 20),
+                    static_cast<unsigned long long>(max_arena_bytes >> 20));
+    }
     const vk::BufferCreateInfo probe_ci = {
         .flags =
             vk::BufferCreateFlagBits::eSparseBinding | vk::BufferCreateFlagBits::eSparseResidency,
-        .size = ARENA_PAGE_SIZE,
+        .size = arena_page_size,
         .usage = ARENA_USAGE,
         .sharingMode = shared ? vk::SharingMode::eConcurrent : vk::SharingMode::eExclusive,
         .queueFamilyIndexCount = shared ? 2u : 0u,
@@ -601,14 +663,13 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     const vk::DeviceBufferMemoryRequirements req_info = {
         .pCreateInfo = &probe_ci,
     };
-    const auto device = instance.GetDevice();
     const auto reqs = device.getBufferMemoryRequirements(req_info).memoryRequirements;
     block_size = Common::AlignUp(std::max<u64>(reqs.alignment, MIN_BLOCK_SIZE), reqs.alignment);
     ASSERT_MSG(std::popcount(block_size) == 1, "Sparse block size {} is not a power of 2",
                block_size);
     block_shift = std::bit_width(block_size) - 1;
-    blocks_per_arena_page = ARENA_PAGE_SIZE / block_size;
-    blocks_per_arena_page_shift = ARENA_PAGE_BITS - block_shift;
+    blocks_per_arena_page = arena_page_size / block_size;
+    blocks_per_arena_page_shift = arena_page_bits - block_shift;
     BbLayer::GpuMemory::Get().SetBlockShift(static_cast<u32>(block_shift));
     group_use.assign(u64{1} << (ADDRESS_SPACE_BITS - USE_GROUP_BITS), 0);
     group_demoted.assign(group_use.size(), 0);
@@ -631,10 +692,10 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     }
 
     const u64 bda_pagetable_size =
-        (blocks_per_arena_page * NUM_ARENA_PAGES) * sizeof(vk::DeviceAddress) *
+        (blocks_per_arena_page * num_arena_pages) * sizeof(vk::DeviceAddress) *
         (LayerActive() ? 2 : 1);
     fault_manager = std::make_unique<FaultManager>(instance, scheduler, *this, block_shift,
-                                                   blocks_per_arena_page * NUM_ARENA_PAGES);
+                                                   blocks_per_arena_page * num_arena_pages);
     bda_pagetable_buffer = std::make_unique<Buffer>(
         instance, 0, bda_pagetable_size, MemoryType::DeviceLocal, "BDA Page Table Buffer");
     runtime.FillBuffer(bda_pagetable_buffer.get(), 0u, bda_pagetable_size, 0u);
@@ -1401,7 +1462,7 @@ void BufferCache::ProcessFaultBuffer() {
 
 void BufferCache::SynchronizeDmaBuffers() {
     for (const auto& range : resident_ranges) {
-        const u64 page = range.start >> (ARENA_PAGE_BITS - block_shift);
+        const u64 page = range.start >> (arena_page_bits - block_shift);
         const VAddr device_addr = range.start << block_shift;
         const u64 size = (range.end - range.start) << block_shift;
         SynchronizeMemory(address_space[page], device_addr, size, false, false);
@@ -1422,7 +1483,7 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
             const u64 num_pages = last_page - first_page + 1;
             const auto* new_arena =
                 &arenas.emplace_back(instance, base_block << block_shift,
-                                     num_pages << ARENA_PAGE_BITS, MemoryType::Sparse);
+                                     num_pages << arena_page_bits, MemoryType::Sparse);
             address_space[first_page] = new_arena;
             address_space[last_page] = new_arena;
         }
@@ -1431,12 +1492,17 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
 
     LOG_WARNING(Render, "Migrating arena");
 
-    const u64 first_addr = first_arena ? first_arena->cpu_addr : (first_page << ARENA_PAGE_BITS);
-    const u64 first_size = first_arena ? first_arena->size_bytes : ARENA_PAGE_SIZE;
-    const u64 last_size = last_arena ? last_arena->size_bytes : ARENA_PAGE_SIZE;
+    const u64 first_addr = first_arena ? first_arena->cpu_addr : (first_page << arena_page_bits);
+    const u64 first_size = first_arena ? first_arena->size_bytes : arena_page_size;
+    const u64 last_size = last_arena ? last_arena->size_bytes : arena_page_size;
 
     const u64 base_block = first_addr >> block_shift;
     const u64 total_size = first_size + last_size;
+    // Arenas only grow by merging; one the driver may refuse cannot be made (a request this wide
+    // needs a driver with larger sparse buffers; the game's bindings are far below a page).
+    ASSERT_MSG(total_size <= max_arena_bytes,
+               "Merged arena of {} MiB exceeds the {} MiB sparse buffers the driver takes",
+               total_size >> 20, max_arena_bytes >> 20);
     const u64 end_block = (first_addr + total_size) >> block_shift;
     auto* new_arena = &arenas.emplace_back(instance, first_addr, total_size, MemoryType::Sparse);
     auto* bind = BindsForArena(new_arena);
@@ -1451,12 +1517,12 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
         });
     });
 
-    u64 base_page = first_addr >> ARENA_PAGE_BITS;
-    for (u32 page = 0; page < (first_size >> ARENA_PAGE_BITS); ++page) {
+    u64 base_page = first_addr >> arena_page_bits;
+    for (u32 page = 0; page < (first_size >> arena_page_bits); ++page) {
         address_space[base_page + page] = new_arena;
     }
     base_page = last_page;
-    for (u32 page = 0; page < (last_size >> ARENA_PAGE_BITS); ++page) {
+    for (u32 page = 0; page < (last_size >> arena_page_bits); ++page) {
         address_space[base_page + page] = new_arena;
     }
     return new_arena;
