@@ -7,10 +7,11 @@ bb-prepare, kgsl-chip-id), the Bionic PKG tool (build_pkg_tool.sh android), the 
 
 Archive layout (everything under bbport/, extracted into the app's files directory):
   bbport/bionic/bin/   bb-probe bb-prepare kgsl-chip-id ps4-pkg-tool   (stripped, executable)
-  bbport/bionic/lib/   libbbgpu.so libbbcpu.so libc++_shared.so
+  bbport/bionic/lib/   libbbgpu.so libbbcpu.so liblsfg-bb.so libc++_shared.so   (liblsfg-bb.so: Lossless Scaling
+                       frame generation, loaded by libbbgpu only when it is on; needs the player's own Lossless.dll)
   bbport/patch-parts/  the settings' BBPATCH2 files (effects, model LOD, resolutions, cheats, ...)
   bbport/run-bionic.sh bbport/fex-compatible.json bbport/bbport.default.ini
-  bbport/licenses/     ps4-pkg-tool.NOTICE
+  bbport/licenses/     ps4-pkg-tool.NOTICE, lsfg-* (the licences of what liblsfg-bb.so contains)
   bbport/data bbport/logs bbport/user   (empty folders)
 """
 import hashlib
@@ -30,7 +31,10 @@ NDK_STRIP = next(iter(sorted((ROOT / '.local-deps/android/sdk/ndk').glob(
     '*/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip'))), None)
 OUT = ROOT / 'out/release'
 PROGRAMS = ('bb-probe', 'bb-prepare', 'kgsl-chip-id', 'ps4-pkg-tool')
-LIBRARIES = ('libbbgpu.so', 'libbbcpu.so', 'libc++_shared.so')
+LIBRARIES = ('libbbgpu.so', 'libbbcpu.so', 'liblsfg-bb.so', 'libc++_shared.so')
+# build_lsfg_android.sh (run by build_bionic.sh): the licences of liblsfg-bb.so's contents, shipped with it.
+LSFG_LICENSES = ('lsfg-vk-android.LICENSE.md', 'lsfg-dxbc.LICENSE', 'lsfg-pe-parse.LICENSE', 'lsfg-volk.LICENSE.md',
+                 'lsfg-source.txt')
 FILES = (
     ('tools/android/run-bionic.sh', 'run-bionic.sh', 0o755),
     ('tools/android/fex-compatible.json', 'fex-compatible.json', 0o644),
@@ -111,6 +115,15 @@ def main():
             info.mode = mode
             owned_by_root(info)
             with open(ROOT / source, 'rb') as handle:
+                tar.addfile(info, handle)
+        for name in LSFG_LICENSES:
+            source = BIONIC / 'licenses' / name
+            if not source.is_file():
+                raise SystemExit(f'Missing {source}: tools/android/build_lsfg_android.sh writes it')
+            info = tar.gettarinfo(str(source), arcname='bbport/licenses/' + name)
+            info.mode = 0o644
+            owned_by_root(info)
+            with open(source, 'rb') as handle:
                 tar.addfile(info, handle)
         for name in EMPTY_DIRS:
             info = tarfile.TarInfo(name)
