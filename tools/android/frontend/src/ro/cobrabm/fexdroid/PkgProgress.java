@@ -22,15 +22,20 @@ final class PkgProgress {
         try { d=Long.parseLong(f[1]); t=Long.parseLong(f[2]); }
         catch (RuntimeException e) { return false; }
         if (d<0 || t<0) return false;
+        update(d,t,f.length>3 ? f[3].trim() : null,now);
+        return true;
+    }
+
+    /** Takes the progress itself (what feed parses from a line); label null keeps the last one. */
+    void update(long d,long t,String name,long now) {
         done=Math.min(d,t>0 ? t : d); total=t;
-        if (f.length>3) label=f[3].trim();
+        if (name!=null) label=name;
         if (firstAt<0) { firstAt=now; sampleAt=now; sampleDone=done; }
         else if (now-sampleAt>=WINDOW) {
             double instant=(done-sampleDone)*1000.0/(now-sampleAt);
             rate=rate==0 ? instant : rate+(instant-rate)*SMOOTHING;
             sampleAt=now; sampleDone=done;
         }
-        return true;
     }
 
     /** 0..1000, or -1 when the total is unknown. */

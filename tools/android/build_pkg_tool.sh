@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # ps4-pkg-tool (github.com/xXJSONDeruloXx/ps4-pkg-tools at 45baeda: shadPS4's PKG/PFS code, GPL-2.0),
-# the CLI that unpacks PS4 fake PKGs for the app's mod installer (mods_android.py install-pkg).
+# the CLI that unpacks PS4 fake PKGs for the app's mod installer (PkgInstaller in the frontend; before: mods_android.py install-pkg).
 # Built out of tree from the (read-only) source:
 #   arm64 -> out/arm64/pkg-tool/ps4-pkg-tool  (also copied to out/arm64/bundle/bin/ when that exists;
 #            build_release_runtime.py bundles it as bbport/arm64/bin/ps4-pkg-tool)
-#   host  -> out/host/pkg-tool/ps4-pkg-tool   (tests/test_mods_android.py)
-# Usage: tools/android/build_pkg_tool.sh [arm64|host|all]   (default: all)
+#   android -> out/bionic/bin/ps4-pkg-tool    (NDK, API 30, static libc++/zlib/cryptopp: NEEDED only Bionic's
+#            libc/libm/libdl; the app's PKG installs run it from files/bbport/bionic/bin/)
+#   host  -> out/host/pkg-tool/ps4-pkg-tool   (tests/test_mods_android.py, tests/android-mods)
+# Usage: tools/android/build_pkg_tool.sh [arm64|android|host|all]   (default: all = arm64 + host; android
+#        is built by name: the glibc arm64 target goes away with the rootfs)
 # Our patches (tools/android/pkg-tool-patches: byte progress, 64-bit offsets for multi-GB PKGs) are
 # applied to a copy of the source in out/pkg-tool-src; the original is never touched.
 # Source: $BB_PKG_TOOL_SRC, else .local-deps/src/ps4-pkg-tools (here or in the main checkout).
@@ -13,6 +16,8 @@ set -euo pipefail
 cd -- "$(dirname -- "$0")/../.."
 root=$PWD
 which=${1:-all}
+jobs=${BB_JOBS:-22}
+run() { taskset -c 2-23 nice -n 19 "$@"; }   # leave two cores free (the PC stays usable)
 src=${BB_PKG_TOOL_SRC:-}
 if [[ -z $src ]]; then
     common=$(cd -- "$(git rev-parse --git-common-dir)/.." && pwd)
@@ -66,7 +71,7 @@ build_arm64() {
         -DZLIB_LIBRARY="$sysroot/usr/lib/aarch64-linux-gnu/libz.a" -DZLIB_INCLUDE_DIR="$sysroot/usr/include" \
         "-DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld -no-pie -static-libstdc++ -static-libgcc -Wl,--dynamic-linker=$interpreter $object" \
         >"$build/cmake.log" 2>&1 || { tail -30 "$build/cmake.log" >&2; exit 1; }
-    ninja -C "$build" ps4-pkg-tool >"$build/build.log" 2>&1 || { tail -40 "$build/build.log" >&2; exit 1; }
+    run ninja -C "$build" -j "$jobs" ps4-pkg-tool >"$build/build.log" 2>&1 || { tail -40 "$build/build.log" >&2; exit 1; }
     mkdir -p "$out"
     cp "$build/ps4-pkg-tool" "$out/ps4-pkg-tool"
     llvm-strip --strip-all "$out/ps4-pkg-tool"
@@ -76,13 +81,38 @@ build_arm64() {
     echo "Built $out/ps4-pkg-tool (aarch64)"
 }
 
+# Android (Bionic): the NDK toolchain as build_bionic.sh, libc++ linked statically (a standalone tool,
+# no libc++_shared.so beside it), the NDK's own libz.a, the vendored cryptopp.
+build_android() {
+    local ndk=${BB_NDK:-$root/.local-deps/android/sdk/ndk/29.0.14206865} api=${BB_ANDROID_API:-30}
+    local llvm=$ndk/toolchains/llvm/prebuilt/linux-x86_64
+    [[ -f $ndk/build/cmake/android.toolchain.cmake ]] || { echo "No NDK: $ndk (tools/android/build_bionic_deps.sh)" >&2; exit 1; }
+    local out=$root/out/bionic/bin build=$root/out/bionic/pkg-tool-build
+    local object; object=$(shim "$build" "$llvm/bin/aarch64-linux-android$api-clang")
+    # pkg.cpp includes zlib by an absolute host path (the glibc build used the host's header): the NDK's own.
+    sed -i 's|</usr/include/zlib.h>|<zlib.h>|' "$src/src/core/file_format/pkg.cpp"
+    local zlib=$llvm/sysroot/usr/lib/aarch64-linux-android/libz.a
+    [[ -f $zlib ]] || { echo "No libz.a in the NDK: $zlib" >&2; exit 1; }
+    run cmake -S "$src" -B "$build" -G Ninja -DCMAKE_TOOLCHAIN_FILE="$ndk/build/cmake/android.toolchain.cmake" \
+        -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-$api -DANDROID_STL=c++_static \
+        -DCMAKE_BUILD_TYPE=Release -DBUILD_PKG_QT_GUI=OFF -DCRYPTOPP_BUILD_TESTING=OFF \
+        -DZLIB_LIBRARY="$zlib" -DZLIB_INCLUDE_DIR="$llvm/sysroot/usr/include" \
+        "-DCMAKE_EXE_LINKER_FLAGS=-Wl,-z,max-page-size=16384 $object" \
+        >"$build/cmake.log" 2>&1 || { tail -30 "$build/cmake.log" >&2; exit 1; }
+    run ninja -C "$build" -j "$jobs" ps4-pkg-tool >"$build/build.log" 2>&1 || { tail -40 "$build/build.log" >&2; exit 1; }
+    mkdir -p "$out"
+    cp "$build/ps4-pkg-tool" "$out/ps4-pkg-tool"
+    "$llvm/bin/llvm-strip" --strip-all "$out/ps4-pkg-tool"
+    echo "Built $out/ps4-pkg-tool (Android arm64)"
+}
+
 build_host() {
     local out=$root/out/host/pkg-tool build=$root/out/host/pkg-tool-build
     local object; object=$(shim "$build" cc)
-    cmake -S "$src" -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_PKG_QT_GUI=OFF \
+    run cmake -S "$src" -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_PKG_QT_GUI=OFF \
         -DCRYPTOPP_BUILD_TESTING=OFF "-DCMAKE_EXE_LINKER_FLAGS=$object" \
         >"$build/cmake.log" 2>&1 || { tail -30 "$build/cmake.log" >&2; exit 1; }
-    ninja -C "$build" ps4-pkg-tool >"$build/build.log" 2>&1 || { tail -40 "$build/build.log" >&2; exit 1; }
+    run ninja -C "$build" -j "$jobs" ps4-pkg-tool >"$build/build.log" 2>&1 || { tail -40 "$build/build.log" >&2; exit 1; }
     mkdir -p "$out"
     cp "$build/ps4-pkg-tool" "$out/ps4-pkg-tool"
     echo "Built $out/ps4-pkg-tool (host)"
@@ -90,7 +120,8 @@ build_host() {
 
 case $which in
     arm64) build_arm64 ;;
+    android) build_android ;;
     host) build_host ;;
     all) build_arm64; build_host ;;
-    *) echo 'usage: build_pkg_tool.sh [arm64|host|all]' >&2; exit 2 ;;
+    *) echo 'usage: build_pkg_tool.sh [arm64|android|host|all]' >&2; exit 2 ;;
 esac

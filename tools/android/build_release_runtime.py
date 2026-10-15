@@ -104,7 +104,7 @@ def stage_bionic(stage):
     """The Bionic runtime's bin/ and lib/ without debug info, executable (the app execs them from its data)."""
     import shutil
     shutil.rmtree(stage, ignore_errors=True)
-    for directory, names in (('bin', ('bb-probe', 'kgsl-chip-id')), ('lib', None)):
+    for directory, names in (('bin', ('bb-probe', 'kgsl-chip-id', 'ps4-pkg-tool')), ('lib', None)):
         (stage / directory).mkdir(parents=True)
         for path in sorted((BIONIC / directory).iterdir()):
             if names is not None and path.name not in names:
@@ -125,6 +125,8 @@ def main():
         raise SystemExit('Build the Bionic runtime first: tools/android/build_bionic.sh')
     if not PKG_TOOL.is_file():
         raise SystemExit('Build the PKG tool first: tools/android/build_pkg_tool.sh arm64')
+    if not (BIONIC / 'bin/ps4-pkg-tool').is_file():
+        raise SystemExit('Build the Bionic PKG tool first (the app runs it for PKG installs): tools/android/build_pkg_tool.sh android')
     if not all((TURNIP / name).is_file() for name in TURNIP_FILES.values()):
         raise SystemExit('Build Turnip first: tools/android/build_turnip.sh')
     if not all((TURNIP_GEN8 / name).is_file() for name in TURNIP_GEN8_FILES.values()):
