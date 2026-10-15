@@ -8,7 +8,10 @@
  * descriptor of the same datagram. Both sides run on the same device (same endianness).
  *
  *   game -> app  HELLO     version; width/height/format/count = the buffer set that follows
- *                          (generation 1). The app answers HELLO (its version) or closes the socket.
+ *                          (generation 1); flags (BB_PRESENT_FLAG_*, in the field `index` shares):
+ *                          how the app is to show the frames, for the whole connection. The app
+ *                          answers HELLO (its version, flags = the ones it accepts) or closes the
+ *                          socket; a version it does not speak is a close, logged on both sides.
  *   game -> app  BUFFER    generation, index, width, height, format. Followed IMMEDIATELY by the
  *                          buffer itself, one more datagram written by
  *                          AHardwareBuffer_sendHandleToUnixSocket (the receiver reads it with
@@ -28,7 +31,20 @@
  *   either       BYE       the sender closes the socket after it.
  *
  * Presentation is throttled by RELEASE: the game reuses a buffer only after its RELEASE, so at most
- * count - 1 frames are in the app's hands (count = 3: one on the display, one pending).
+ * count - 1 frames are in the app's hands while the game renders the next one (count = 3: one on the
+ * display, one pending).
+ *
+ * Presentation modes (HELLO flags):
+ *   no flag  Newest wins ("VSync off"): every FRAME is applied at once; frames that arrive within
+ *            one display refresh replace each other and only the newest is ever shown (the others
+ *            are released without having been on screen). No tearing; the lowest latency.
+ *   BB_PRESENT_FLAG_FIFO  ("VSync on"): a FRAME is applied only after the previous one has reached
+ *            the display, so every frame is shown for at least one refresh, in order. Frames that
+ *            arrive meanwhile wait in the app (at most count of them); the game is held back by the
+ *            missing RELEASEs. Bionic game: BB_VSYNC=1 (bbport.ini vsync=1).
+ * Both modes use the same messages and the same RELEASE rules; the mode never changes in a
+ * connection. Frame generation that adds frames in the app (the plan: Lossless Scaling) works on
+ * what FRAME delivers in either mode; FIFO is the one with an even spacing to build on.
  */
 #ifndef BB_PRESENT_PROTO_H
 #define BB_PRESENT_PROTO_H
@@ -41,8 +57,12 @@
 #include <unistd.h>
 
 #define BB_PRESENT_MAGIC 0x52504242u /* "BBPR" */
-#define BB_PRESENT_VERSION 1u
+#define BB_PRESENT_VERSION 2u
 #define BB_PRESENT_MAX_BUFFERS 8u
+
+/* HELLO flags. */
+#define BB_PRESENT_FLAG_FIFO 0x1u /* show every frame for at least one refresh, in order (VSync) */
+#define BB_PRESENT_FLAGS_KNOWN BB_PRESENT_FLAG_FIFO
 
 enum bb_present_type {
     BB_PRESENT_HELLO = 1,
@@ -58,7 +78,10 @@ typedef struct bb_present_msg {
     uint16_t version;    /* BB_PRESENT_VERSION */
     uint16_t type;       /* enum bb_present_type */
     uint32_t generation; /* buffer set, starts at 1, +1 on every RESET */
-    uint32_t index;      /* buffer number, < count */
+    union {
+        uint32_t index; /* buffer number, < count (BUFFER, FRAME, RELEASE) */
+        uint32_t flags; /* BB_PRESENT_FLAG_* (HELLO, and the app's answer) */
+    };
     uint32_t width;      /* pixels */
     uint32_t height;
     uint32_t format;     /* AHARDWAREBUFFER_FORMAT_* */

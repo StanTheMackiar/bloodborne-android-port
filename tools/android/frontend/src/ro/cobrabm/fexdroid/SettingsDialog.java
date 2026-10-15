@@ -234,6 +234,12 @@ final class SettingsDialog {
         TextView fpsNote=new TextView(activity); fpsNote.setTextSize(13); fpsNote.setAlpha(0.7f);
         fpsNote.setText("Above 30 uses the community frame-rate patch (game timing follows the real frame time).");
         box.addView(fpsNote);
+        heading(box,"VSync");
+        final Switch vsync=toggle(box,"VSync","1".equals(get("vsync","0")));
+        TextView vsyncNote=new TextView(activity); vsyncNote.setTextSize(13); vsyncNote.setAlpha(0.7f);
+        vsyncNote.setText("Every frame is shown for at least one screen refresh: smoother pacing, a little more latency. "
+            +"Off: the newest frame is shown, frames finished within the same refresh are skipped.");
+        box.addView(vsyncNote);
 
         heading(box,"CPU cores the game may use");
         final Switch[] cores=new Switch[CORE_NAMES.length];
@@ -264,6 +270,7 @@ final class SettingsDialog {
                 changed.put("upscaler",UPSCALER_VALUES[Math.max(0,checkedIndex(upscalers))]);
                 changed.put("fps_limit",FPS_VALUES[Math.max(0,checkedIndex(fpsLimit))]);
                 changed.put("frame_generation",frameGen.isChecked() && checkedIndex(upscalers)!=0 ? "1" : "0");
+                changed.put("vsync",vsync.isChecked() ? "1" : "0");
                 changed.put("thor_cpus",cpuList(cores));
                 changed.put("preset",String.valueOf(Math.max(0,checkedIndex(presets))));
                 changed.put("sharpen",sharpen.isChecked() ? "1" : "0");

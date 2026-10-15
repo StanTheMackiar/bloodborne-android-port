@@ -917,7 +917,10 @@ public final class MainActivity extends Activity {
     }
     /** Frame generation (FSR 3.1) presents 2 frames per game frame, spaced by FIFO evenly only when the display
      *  runs at FPS limit x 2: that mode when the display has it (30x2: 60 Hz, 40x2, 60x2: 120 Hz), else the
-     *  fastest one. Without frame generation, the system's choice. */
+     *  fastest one. Without frame generation, the system's choice. VSync (the vsync setting, a FIFO in the
+     *  app's bbpresent) is what makes that spacing reliable: each presented frame then stays up for exactly
+     *  one refresh, so a real frame and its generated one alternate evenly; without it frames that land in
+     *  the same refresh replace each other and the pairs skip. */
     private void pickRefreshRate() {
         int frames="1".equals(setting("frame_generation")) ? 2 : 1;
         String limit=setting("fps_limit"); // as run-bionic.sh: 40, 45, 60, 0 (none), else 30

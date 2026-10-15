@@ -33,6 +33,11 @@ bool Client::Configured() {
     return SocketPath() != nullptr;
 }
 
+bool Client::VsyncRequested() {
+    const char* value = std::getenv("BB_VSYNC");
+    return value && std::strtol(value, nullptr, 10) != 0;
+}
+
 bool Client::Connect(u32 width, u32 height, u32 format, u32 count) {
     const char* path = SocketPath();
     if (!path) {
@@ -79,6 +84,7 @@ bool Client::Connect(u32 width, u32 height, u32 format, u32 count) {
     hello.height = height;
     hello.format = format;
     hello.count = count;
+    hello.flags = VsyncRequested() ? BB_PRESENT_FLAG_FIFO : 0;
     if (!SendRaw(&hello, -1)) {
         Disconnect();
         return false;
@@ -102,8 +108,15 @@ bool Client::Connect(u32 width, u32 height, u32 format, u32 count) {
         Disconnect();
         return false;
     }
-    std::printf("Present: connected to the app (protocol %u), %u buffers %ux%u\n", answer.version,
-                count, width, height);
+    if ((answer.flags & BB_PRESENT_FLAGS_KNOWN) != hello.flags) {
+        // Same protocol version, so the app knows the flag: it only answers what it will do.
+        std::printf("Present: the app does not show frames the way asked (flags %#x, answered %#x)\n",
+                    hello.flags, answer.flags);
+    }
+    std::printf("Present: connected to the app (protocol %u), %u buffers %ux%u, %s\n", answer.version,
+                count, width, height,
+                (answer.flags & BB_PRESENT_FLAG_FIFO) ? "VSync on (every frame shown for a refresh)"
+                                                      : "VSync off (newest frame shown)");
     return true;
 }
 

@@ -11,7 +11,12 @@
 //    its release fence into a semaphore the presenter's submission waits on;
 //  - Present exports the present-ready semaphore as a sync file (VK_KHR_external_semaphore_fd) and sends
 //    it with the frame: the app's acquire fence.
-// At most image_count - 1 frames are in the app's hands.
+// At most image_count - 1 frames are in the app's hands (plus the one being sent).
+// Pacing is the app's: with BB_VSYNC=1 (bbport.ini vsync=1; BB_PRESENT_FLAG_FIFO in HELLO) it shows
+// every frame for at least one display refresh, in order, and holds back the RELEASEs of the frames
+// it has not shown yet, so AcquireNextImage blocks and the game runs at the refresh rate at most
+// (BB_FPS_LIMIT=0). Without it the newest frame wins and the rest are skipped. Either way this class
+// only waits for the RELEASEs; nothing here depends on the mode.
 #pragma once
 
 #ifdef __ANDROID__

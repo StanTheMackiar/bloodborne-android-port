@@ -85,6 +85,11 @@ case $fps_limit in 40|45|60|0) export BB_VBLANK_HZ=480 BB_FPS_LIMIT=$fps_limit ;
 if [ "${BB_FRAME_GEN:-0}" = 1 ] && [ "$fps_limit" = 30 ]; then
     fps_limit=30-delta; export BB_VBLANK_HZ=480 BB_FPS_LIMIT=30
 fi
+# VSync (vsync=1): the app shows every frame for at least one display refresh, in order (a FIFO in
+# the app: libbbgpu says so in HELLO, bb_present_proto.h), which also holds the game to the refresh
+# rate when there is no FPS limit; 0: the newest frame is shown, frames that finish within one
+# refresh are skipped. BB_VSYNC=0/1 in bionic-local.sh overrides.
+[ "$(setting vsync)" = 1 ] && export BB_VSYNC=1 || export BB_VSYNC=0
 # CPU cores (thor_cpus, a taskset list such as 3-7): empty for all of them.
 [ -z "${BB_THOR_CPUS:-}" ] && BB_THOR_CPUS=$(setting thor_cpus)
 

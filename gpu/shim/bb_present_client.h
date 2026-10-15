@@ -26,8 +26,13 @@ public:
     /// renders into the buffers and nobody shows them (benchmarks, a missing app).
     static bool Configured();
 
+    /// True when BB_VSYNC=1 (bbport.ini vsync=1): the app is to show every frame for at least one
+    /// display refresh, in order (BB_PRESENT_FLAG_FIFO in HELLO), instead of the newest only.
+    static bool VsyncRequested();
+
     /// Connects to BB_PRESENT_SOCKET (retries for a while: the app may be a moment late), says HELLO
-    /// and checks the app's version. Returns false (logged) when there is no app to talk to.
+    /// (with the presentation mode: VsyncRequested()) and checks the app's version. Returns false
+    /// (logged) when there is no app to talk to.
     bool Connect(u32 width, u32 height, u32 format, u32 count);
     bool Connected() const { return fd >= 0; }
 
