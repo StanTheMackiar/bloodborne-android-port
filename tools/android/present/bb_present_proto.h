@@ -38,8 +38,10 @@
  *   no flag  Newest wins ("VSync off"): every FRAME is applied at once; frames that arrive within
  *            one display refresh replace each other and only the newest is ever shown (the others
  *            are released without having been on screen). No tearing; the lowest latency.
- *   BB_PRESENT_FLAG_FIFO  ("VSync on"): a FRAME is applied only after the previous one has reached
- *            the display, so every frame is shown for at least one refresh, in order. Frames that
+ *   BB_PRESENT_FLAG_FIFO  ("VSync on"): a FRAME is applied only after the previous one has been
+ *            latched by SurfaceFlinger (ASurfaceTransaction_setOnCommit, Android 12+; on 10/11 only
+ *            setOnComplete exists, i.e. after it was presented, and the rate may halve), so every
+ *            frame is shown for at least one refresh, in order, one per refresh. Frames that
  *            arrive meanwhile wait in the app (at most count of them); the game is held back by the
  *            missing RELEASEs. Bionic game: BB_VSYNC=1 (bbport.ini vsync=1).
  * Both modes use the same messages and the same RELEASE rules; the mode never changes in a

@@ -14,21 +14,36 @@
  *    on_complete as the "replaced" buffer). No tearing, lowest latency.
  *
  *  - FIFO ("VSync on"): at most ONE transaction is outstanding. A FRAME that arrives while the previous
- *    transaction has not completed (on_complete: it reached the display) waits in a queue; when it
- *    completes, the next queued frame is applied. So each frame is on screen for at least one refresh,
- *    in order, and with the display slower than the game the game is paced by the refresh rate: the
+ *    transaction is outstanding waits in a queue; when that one is done, the next queued frame is
+ *    applied. So each frame is on screen for at least one refresh, in order, and with the display
+ *    slower than the game the game is paced by the refresh rate: the
  *    queue is bounded (a frame in it is a buffer the game does not get back, and the game holds one
  *    to render, so with `count` buffers the app holds at most count of them: the one on the display,
  *    the outstanding one and count - 2 queued; the array has room for BB_PRESENT_MAX_BUFFERS).
  *
- * Who applies the next queued transaction: the receive thread, never on_complete. on_complete runs on
+ * "Done" means LATCHED, not presented: ASurfaceTransaction_setOnComplete fires after the frame has been
+ * presented (its present fence), which is already past the latch deadline of the next refresh, so
+ * gating the next transaction on it would show one frame every 2nd refresh (30 FPS on 60 Hz).
+ * ASurfaceTransaction_setOnCommit (API 31) fires when SurfaceFlinger latches the transaction, early
+ * in the refresh before the one that shows it; the next transaction applied right then is latched for
+ * the following refresh. So with setOnCommit (resolved with dlsym) the commit callback clears the
+ * outstanding transaction and the complete callback only answers RELEASE, as in the other mode. On
+ * API 29/30 there is no setOnCommit: on_complete does both, and FIFO pacing may halve the rate there
+ * (logged once).
+ *
+ * Who applies the next queued transaction: the receive thread, never a callback. The callbacks run on
  * a binder thread inside libgui's transaction-callback dispatch; whether applying another transaction
- * (which registers a callback with the same TransactionCompletedListener) from inside a callback is
- * safe depends on its locking, which the NDK does not promise. So on_complete only answers RELEASE,
- * marks the transaction done and wakes the receive thread through an eventfd; the receive thread polls
- * the socket and the eventfd, and applies from there (under the mutex like everything else). Cost: one
- * thread wake-up (well under a millisecond, far below the refresh interval) between a frame reaching
- * the display and the next being handed to SurfaceFlinger, which latches at the following refresh.
+ * (which registers callbacks with the same TransactionCompletedListener) from inside one is safe
+ * depends on its locking, which the NDK does not promise. So the callback only marks the transaction
+ * done and wakes the receive thread through an eventfd; the receive thread polls the socket and the
+ * eventfd, and applies from there (under the mutex like everything else). Cost: one thread wake-up
+ * (well under a millisecond, far below the refresh interval).
+ *
+ * Callback ownership: each transaction has a DoneCtx (on_complete, frees it) and, in FIFO mode with
+ * setOnCommit, a CommitCtx of its own (on_commit, frees it): each callback fires exactly once per
+ * applied transaction, so each context has one owner and nothing is shared or counted. Both carry the
+ * session and the transaction id; a callback of an older session or transaction does not touch
+ * S.inflight.
  */
 #include <android/hardware_buffer.h>
 #include <android/log.h>
@@ -68,6 +83,7 @@ static struct {
     void (*set_visibility)(ASurfaceTransaction*, ASurfaceControl*, int8_t);
     void (*set_transparency)(ASurfaceTransaction*, ASurfaceControl*, int8_t);
     void (*set_on_complete)(ASurfaceTransaction*, void*, void (*)(void*, ASurfaceTransactionStats*));
+    void (*set_on_commit)(ASurfaceTransaction*, void*, void (*)(void*, ASurfaceTransactionStats*)); /* API 31, optional */
     int (*prev_release_fence)(ASurfaceTransactionStats*, ASurfaceControl*);
     void (*get_controls)(ASurfaceTransactionStats*, ASurfaceControl***, size_t*);
     void (*release_controls)(ASurfaceControl**);
@@ -77,6 +93,7 @@ static struct {
 static void load_api(void) {
     void* lib = dlopen("libandroid.so", RTLD_NOW);
     if (!lib) return;
+    *(void**)&api.set_on_commit = dlsym(lib, "ASurfaceTransaction_setOnCommit"); /* optional */
 #define SYM(field, name) if (!(*(void**)&api.field = dlsym(lib, name))) return
     SYM(create_from_window, "ASurfaceControl_createFromWindow");
     SYM(release, "ASurfaceControl_release");
@@ -192,7 +209,13 @@ typedef struct {
     uint32_t session, generation, index; /* the buffer the transaction replaced; index == ~0: none */
     uint64_t frame;
     uint64_t seq; /* the transaction's id (S.txn_seq), compared with S.inflight */
+    int gates;    /* FIFO without a commit callback: this on_complete ends the outstanding state */
 } DoneCtx;
+
+typedef struct {
+    uint32_t session;
+    uint64_t seq;
+} CommitCtx;
 
 static void wake_receiver(void) {
     uint64_t one = 1;
@@ -216,6 +239,19 @@ static void on_complete(void* ctx_, ASurfaceTransactionStats* stats) {
     }
     /* FIFO: this transaction is on the display, the next queued frame may go (applied by the
      * receive thread, see the top of the file). */
+    if (ctx->gates && S.fifo && ctx->session == S.session && ctx->seq == S.inflight) {
+        S.inflight = 0;
+        if (S.queue_len) wake_receiver();
+    }
+    pthread_mutex_unlock(&S.lock);
+    free(ctx);
+}
+
+/* FIFO, API 31: SurfaceFlinger latched the transaction; the next queued frame may go. */
+static void on_commit(void* ctx_, ASurfaceTransactionStats* stats) {
+    (void)stats;
+    CommitCtx* ctx = ctx_;
+    pthread_mutex_lock(&S.lock);
     if (S.fifo && ctx->session == S.session && ctx->seq == S.inflight) {
         S.inflight = 0;
         if (S.queue_len) wake_receiver();
@@ -242,12 +278,23 @@ static void show_frame(uint32_t generation, uint32_t index, uint64_t frame, uint
     ctx->index = S.last_set >= 0 ? (uint32_t)S.last_set : ~0u; /* replaced by this transaction */
     ctx->frame = 0;
     ctx->seq = ++S.txn_seq;
+    ctx->gates = 0;
+    CommitCtx* commit = NULL;
+    if (S.fifo) {
+        if (api.set_on_commit && (commit = malloc(sizeof *commit))) {
+            commit->session = ctx->session;
+            commit->seq = ctx->seq;
+        } else {
+            ctx->gates = 1; /* no commit callback: the complete one gates (API 29/30, or no memory) */
+        }
+    }
     ASurfaceTransaction* t = api.txn_create();
     api.set_buffer(t, S.sc, S.bufs[index], acquire_fd); /* takes the fd */
     api.set_geometry(t, S.sc, &src, &dst, 0);
     api.set_transparency(t, S.sc, ASURFACE_TRANSACTION_TRANSPARENCY_OPAQUE);
     api.set_visibility(t, S.sc, ASURFACE_TRANSACTION_VISIBILITY_SHOW);
     api.set_on_complete(t, ctx, on_complete);
+    if (commit) api.set_on_commit(t, commit, on_commit);
     api.txn_apply(t);
     api.txn_delete(t);
     S.last_set = (int)index;
@@ -364,6 +411,14 @@ static void serve(int fd) {
             S.count = m.count;
             S.fifo = (m.flags & BB_PRESENT_FLAG_FIFO) != 0;
             LOGI("presentation: %s", S.fifo ? "FIFO (VSync on)" : "newest frame (VSync off)");
+            if (S.fifo && !api.set_on_commit) {
+                static int warned;
+                if (!warned) {
+                    warned = 1;
+                    LOGI("no ASurfaceTransaction_setOnCommit (needs Android 12): FIFO waits for the frame to be "
+                         "presented before the next, which may halve the frame rate");
+                }
+            }
             bb_present_msg a = bb_present_make(BB_PRESENT_HELLO);
             a.generation = m.generation;
             a.flags = m.flags & BB_PRESENT_FLAGS_KNOWN; /* what the app will do */
