@@ -17,13 +17,16 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import org.json.JSONObject;
 
-/** Vulkan drivers the player installs from a zip, beside the bundled Turnip. Each one lives in
- *  files/drivers/<id>/: the zip's libraries, driver.json (its name and version) and icd.json (the
- *  Vulkan loader's manifest, naming the library there). bbport.ini gpu_driver=<id> picks one;
- *  run-thor.sh then uses its icd.json, else the bundled Turnip.
+/** Vulkan drivers the player installs from a zip, beside the bundled Turnip or the phone's own driver.
+ *  Each one lives in files/drivers/<id>/: the zip's libraries and driver.json (its name and version).
+ *  bbport.ini gpu_driver=<id> picks one (empty or "system": none).
  *
- *  The game is a glibc Linux process: only Linux (glibc) builds load, such as Turnip for Winlator
- *  or Mobox. Turnip for Android (adrenotools zips with meta.json, bionic) cannot. */
+ *  Two kinds, by the runtime (bionic, set from MainActivity.bionicRuntime()):
+ *  - Linux (glibc) runtime, run-thor.sh: Linux builds such as Turnip for Winlator or Mobox, with icd.json
+ *    (the Vulkan loader's manifest, naming the library there); else the bundled Turnip.
+ *  - Bionic runtime, run-bionic.sh: Android builds (adrenotools-style zips: meta.json with libraryName, and
+ *    the .so), with driver.lib (the library's file name); libbbgpu dlopens it as BB_VULKAN_DRIVER. Else the
+ *    phone's stock driver. */
 final class DriverManager {
     /** An installed driver: its folder name, what its zip calls it, its version (or "") and the zip's
      *  file name (or "", when unknown): the download list matches releases by it. */
@@ -35,6 +38,8 @@ final class DriverManager {
 
     private static final long MAX_SIZE=1024L*1024*1024;
     private final File dir, root;
+    /** The runtime the list, install and find are for: true Bionic (Android drivers), false glibc. */
+    volatile boolean bionic;
 
     /** files: the app's files directory (its drivers/ folder and the rootfs's libraries). */
     DriverManager(File files) { dir=new File(files,"drivers"); root=new File(files,"rootfs"); }
@@ -45,7 +50,7 @@ final class DriverManager {
         if (folders==null) return out;
         java.util.Arrays.sort(folders);
         for (File folder:folders) {
-            if (folder.getName().startsWith(".") || !new File(folder,"icd.json").isFile()) continue;
+            if (folder.getName().startsWith(".") || !new File(folder,bionic ? "driver.lib" : "icd.json").isFile()) continue;
             String name=folder.getName(), version="", zip="";
             try {
                 JSONObject about=new JSONObject(new String(Files.readAllBytes(new File(folder,"driver.json").toPath()),StandardCharsets.UTF_8));
@@ -65,6 +70,7 @@ final class DriverManager {
     /** Unpacks a driver zip (named zipName, for the driver's name when it has none), checks it and
      *  installs it. Returns the new driver; an IOException's message says what is wrong with the zip. */
     Driver install(InputStream in,String zipName) throws IOException {
+        if (bionic) return installBionic(in,zipName);
         if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("Cannot create "+dir);
         File staging=new File(dir,".installing");
         deleteTree(staging);
@@ -141,6 +147,80 @@ final class DriverManager {
         }
     }
 
+    /** Library names of an Android driver zip: vulkan.ad07XX.so, libvulkan_freedreno.so, ... */
+    static boolean androidLibraryName(String name) { return name.matches("[A-Za-z0-9._+-]+\\.so(\\.[0-9]+)*"); }
+
+    /** An adrenotools-style zip for the Bionic runtime: meta.json (libraryName, name, driverVersion, ...) and the
+     *  library. Every .so is unpacked flat into the driver's folder; driver.lib names the one to load. */
+    private Driver installBionic(InputStream in,String zipName) throws IOException {
+        if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("Cannot create "+dir);
+        File staging=new File(dir,".installing");
+        deleteTree(staging);
+        if (!staging.mkdirs()) throw new IOException("Cannot create "+staging);
+        try {
+            JSONObject meta=null;
+            List<String> libraries=new ArrayList<>();
+            long total=0;
+            byte[] buffer=new byte[1<<16];
+            try (ZipInputStream zip=new ZipInputStream(in)) {
+                for (ZipEntry e; (e=zip.getNextEntry())!=null;) {
+                    if (e.isDirectory()) continue;
+                    String path=e.getName().replace('\\','/');
+                    String name=path.substring(path.lastIndexOf('/')+1);
+                    if (name.equals("meta.json")) {
+                        java.io.ByteArrayOutputStream bytes=new java.io.ByteArrayOutputStream();
+                        for (int n; (n=zip.read(buffer))>0;) { bytes.write(buffer,0,n); if (bytes.size()>1<<20) throw new IOException("meta.json is too large"); }
+                        if (meta==null) meta=parseMeta(bytes.toString("UTF-8"));
+                        continue;
+                    }
+                    if (!androidLibraryName(name) || libraries.contains(name)) continue;
+                    try (FileOutputStream out=new FileOutputStream(new File(staging,name))) {
+                        for (int n; (n=zip.read(buffer))>0;) {
+                            total+=n;
+                            if (total>MAX_SIZE) throw new IOException("The zip's libraries are larger than 1 GB");
+                            out.write(buffer,0,n);
+                        }
+                    }
+                    libraries.add(name);
+                }
+            }
+            if (libraries.isEmpty()) throw new IOException("The zip has no driver library (a .so file).");
+            String named=meta==null ? "" : meta.optString("libraryName","");
+            named=named.substring(named.lastIndexOf('/')+1);
+            String library=pickAndroidLibrary(libraries,named);
+            if (library==null) throw new IOException(!named.isEmpty() ? "meta.json names "+named+", which is not in the zip. Found: "+String.join(", ",libraries)
+                : "The zip has no meta.json with a libraryName, and no single Vulkan driver library. Found: "+String.join(", ",libraries));
+            String problem=checkBionicLibrary(new File(staging,library));
+            if (problem!=null) throw new IOException(library+" "+problem);
+            String name=meta!=null && !meta.optString("name").isEmpty() ? meta.optString("name") : zipName.replaceAll("(?i)\\.zip$","");
+            String version=meta!=null ? meta.optString("driverVersion",meta.optString("packageVersion","")) : "";
+            String id=uniqueId(name);
+            File target=new File(dir,id);
+            JSONObject about=new JSONObject();
+            about.put("name",name); about.put("version",version); about.put("library",library); about.put("zip",zipName);
+            about.put("runtime","bionic");
+            if (meta!=null) for (String key:new String[]{"vendor","description","minApi"}) if (meta.has(key)) about.put(key,meta.get(key));
+            Files.write(new File(staging,"driver.json").toPath(),about.toString(2).getBytes(StandardCharsets.UTF_8));
+            Files.write(new File(staging,"driver.lib").toPath(),(library+"\n").getBytes(StandardCharsets.UTF_8));
+            if (!staging.renameTo(target)) throw new IOException("Cannot move the driver to "+target);
+            return new Driver(id,name,version,zipName);
+        } catch (org.json.JSONException ex) {
+            throw new IOException(ex.toString());
+        } finally {
+            deleteTree(staging);
+        }
+    }
+    private static JSONObject parseMeta(String text) throws IOException {
+        try { return new JSONObject(text); } catch (org.json.JSONException ex) { throw new IOException("meta.json is not valid JSON"); }
+    }
+    /** The library meta.json's libraryName says, else the only libvulkan*.so / vulkan.*.so, else the only .so; null if unclear. */
+    static String pickAndroidLibrary(List<String> libraries,String named) {
+        if (!named.isEmpty()) return libraries.contains(named) ? named : null;
+        String found=null;
+        for (String name:libraries) if (name.startsWith("libvulkan") || name.startsWith("vulkan.")) { if (found!=null) return null; found=name; }
+        return found!=null ? found : libraries.size()==1 ? libraries.get(0) : null;
+    }
+
     private static String sha256(File file) throws IOException {
         try (InputStream in=new java.io.FileInputStream(file)) {
             java.security.MessageDigest hash=java.security.MessageDigest.getInstance("SHA-256");
@@ -169,7 +249,11 @@ final class DriverManager {
 
     /** Null when the library can load here: a 64-bit ARM glibc shared library that is a Vulkan
      *  driver, whose libraries are in the rootfs or the zip. Else what is wrong with it. */
-    String checkLibrary(File so,File beside) throws IOException {
+    String checkLibrary(File so,File beside) throws IOException { return check(so,beside,false); }
+    /** Null when the library can load in the Bionic runtime: a 64-bit ARM Android shared library (it needs
+     *  libc.so, not libc.so.6) that is a Vulkan driver. Else what is wrong with it. */
+    String checkBionicLibrary(File so) throws IOException { return check(so,null,true); }
+    private String check(File so,File beside,boolean android) throws IOException {
         try (RandomAccessFile f=new RandomAccessFile(so,"r"); FileChannel channel=f.getChannel()) {
             if (channel.size()<64 || channel.size()>Integer.MAX_VALUE) return "is not a driver library";
             ByteBuffer b=channel.map(FileChannel.MapMode.READ_ONLY,0,channel.size()).order(ByteOrder.LITTLE_ENDIAN);
@@ -200,13 +284,23 @@ final class DriverManager {
             if (strings<0 || strings+strsz>b.limit()) return "is damaged (string table)";
             List<String> libs=new ArrayList<>();
             for (long offset:needed) libs.add(cString(b,(int)(strings+offset)));
-            if (libs.contains("libc.so") || libs.contains("liblog.so"))
-                return "is a Turnip build for Android (bionic, e.g. an adrenotools zip). The game runs in a Linux "
-                    +"(glibc) runtime: use a Linux build of the driver, such as Turnip for Winlator or Mobox.";
-            if (!libs.contains("libc.so.6")) return "is not a Linux (glibc) library";
+            if (android) {
+                if (libs.contains("libc.so.6")) return "is a Linux (glibc) build, such as Turnip for Winlator or Mobox. "
+                    +"The Bionic runtime needs a driver built for Android (an adrenotools-style zip with meta.json); "
+                    +"switch the runtime to Linux (glibc) in the graphics settings to use this one.";
+                if (!libs.contains("libc.so")) return "is not an Android (Bionic) library";
+            } else {
+                if (libs.contains("libc.so") || libs.contains("liblog.so"))
+                    return "is a Turnip build for Android (bionic, e.g. an adrenotools zip). The Linux (glibc) runtime cannot "
+                        +"load it: use a Linux build of the driver, such as Turnip for Winlator or Mobox, or switch the runtime "
+                        +"to Bionic in the graphics settings.";
+                if (!libs.contains("libc.so.6")) return "is not a Linux (glibc) library";
+            }
             byte[] table=new byte[(int)strsz]; b.position((int)strings); b.get(table);
-            if (!new String(table,StandardCharsets.ISO_8859_1).contains("\0vk_icdGetInstanceProcAddr\0"))
+            String names=new String(table,StandardCharsets.ISO_8859_1);
+            if (!names.contains("\0vk_icdGetInstanceProcAddr\0") && !(android && names.contains("\0vkGetInstanceProcAddr\0")))
                 return "is not a Vulkan driver (it has no vk_icdGetInstanceProcAddr)";
+            if (android) return null; // its other libraries are the phone's own
             List<String> missing=new ArrayList<>();
             for (String lib:libs)
                 if (!new File(beside,lib).exists() && !new File(root,"usr/lib/aarch64-linux-gnu/"+lib).exists()
