@@ -76,15 +76,18 @@ bb_prepare_game() {
         echo 'Python runtime missing; cannot prepare the selected game files' >&2
         exit 2
     fi
-    # Loose-file mods (mods_enabled, default on): a symlink overlay of the game folder, built
-    # after prepare_game.py (it needs the original eboot). mods_android.py prints the folder to
-    # run (the overlay, or the game itself when no valid enabled mod); it never fails the launch.
+    # Loose-file mods (mods_enabled, default on): a symlink overlay of the game folder. The app builds it
+    # (ModManager.apply, in Java) right before the launch and passes the folder to run in BB_APP0_DIR.
     mods_dir=$(setting mods_dir)
     [ -n "$mods_dir" ] || mods_dir=/storage/emulated/0/Bloodborne/mods
     export BB_MODS_DIR="$mods_dir"
     [ -n "${BB_MOD_TRACE:-}" ] && export BB_MOD_TRACE
     app0_dir=$game_dir
-    if [ "$(setting mods_enabled)" != 0 ] && [ -x "$host/usr/bin/python3.13" ]; then
+    if [ -n "${BB_APP0_DIR:-}" ]; then
+        # The app's overlay (or the game folder itself without mods). Without it (a launch from a shell, or
+        # by an older app) the rootfs's Python builds it below.
+        app0_dir=$BB_APP0_DIR
+    elif [ "$(setting mods_enabled)" != 0 ] && [ -x "$host/usr/bin/python3.13" ]; then
         mods_game=$(PYTHONHOME="$host/usr" "$host/usr/bin/python3.13" "$base/scripts/mods_android.py" apply \
             --game "$game_dir" --out "$base/mod-game" --mods-dir "$mods_dir" \
             --config "$base/mods.json" | tail -n 1) || mods_game=
