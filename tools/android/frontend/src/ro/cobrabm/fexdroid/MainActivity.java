@@ -39,6 +39,17 @@ import java.util.regex.Pattern;
 
 /** Bloodborne-only Android player. Keeps the game surface alive beneath its sliding drawer. */
 public final class MainActivity extends Activity {
+    // ---- Runtime: bbport.ini runtime=bionic (default: the Android build, run-bionic.sh) or glibc (run-thor.sh, X server, Turnip) ----
+    private static volatile File iniFile;
+    /** Whether the game runs as the Bionic (Android NDK) process; read from bbport.ini each time. */
+    static boolean bionicRuntime() {
+        File ini=iniFile; String value=null;
+        if (ini!=null) try (BufferedReader r=new BufferedReader(new java.io.FileReader(ini))) {
+            for (String line; (line=r.readLine())!=null;) if (line.startsWith("runtime=")) value=line.substring(8).trim();
+        } catch (Exception ignored) {}
+        return !"glibc".equals(value);
+    }
+
     /** The app's files (by package: com.ducvd89.bloodborne), its Linux rootfs and the bbport runtime.
      *  The rootfs programs name its absolute path (their interpreter), set when it was installed. */
     private String FILES, ROOT, BASE;
@@ -80,7 +91,8 @@ public final class MainActivity extends Activity {
         super.onCreate(saved);
         FILES="/data/data/"+getPackageName()+"/files";
         ROOT=FILES+"/rootfs"; BASE=FILES+"/bbport";
-        drivers=new DriverManager(new File(FILES));
+        iniFile=new File(BASE,"bbport.ini");
+        drivers=new DriverManager(new File(FILES)); drivers.bionic=bionicRuntime();
         GameInstaller.Host host=modsHost();
         mods=new ModsDialog(this,host); installer=new GameInstaller(this,host);
         updater=new AppUpdater(this,new AppUpdater.Host() {
@@ -334,8 +346,10 @@ public final class MainActivity extends Activity {
         File found=losslessDll();
         setDetail(steamItem,found==null ? "Sign in with your Steam account"
             : found.getParent().equals(BASE) ? "Downloaded from Steam" : "Using Lossless.dll next to the game folder");
+        drivers.bionic=bionicRuntime();
         DriverManager.Driver driver=drivers.find(setting("gpu_driver"));
-        setDetail(driverItem,driver==null ? "Built-in Turnip" : driver.title()+" · automatic choice off");
+        setDetail(driverItem,driver==null ? drivers.bionic ? "System driver (stock)" : "Built-in Turnip"
+            : driver.title()+(drivers.bionic ? "" : " · automatic choice off"));
         setDetail(controllerItem,controllerEnabled() ? "On" : "Off");
         setDetail(folderItem,gameDir==null ? "Not chosen" : gameDir);
     }
@@ -461,7 +475,9 @@ public final class MainActivity extends Activity {
         try { if (!p.waitFor(5,java.util.concurrent.TimeUnit.SECONDS)) p.destroyForcibly(); }
         catch (InterruptedException e) { p.destroyForcibly(); Thread.currentThread().interrupt(); }
     }
-    private Process process(String... args) throws java.io.IOException {
+    private Process process(String... args) throws java.io.IOException { return process(new String[0],args); }
+    /** extra: NAME=value pairs added to the environment. */
+    private Process process(String[] extra,String... args) throws java.io.IOException {
         ProcessBuilder b=new ProcessBuilder(args).redirectErrorStream(true);
         Map<String,String> env=b.environment(); env.clear();
         env.put("PATH",ROOT+"/usr/bin:"+ROOT+"/bin:/system/bin");
@@ -476,6 +492,7 @@ public final class MainActivity extends Activity {
         if (gameDir!=null) env.put("BB_GAME_DIR",gameDir);
         if (args[0].endsWith("/Xvfb")) env.put("LD_PRELOAD",ROOT+"/usr/lib/fexdroid/libfxpath.so");
         env.put("LIBGL_DRIVERS_PATH",ROOT+"/usr/lib/aarch64-linux-gnu/dri");
+        for (String pair:extra) { int eq=pair.indexOf('='); env.put(pair.substring(0,eq),pair.substring(eq+1)); }
         return b.start();
     }
     /** The runtime's scripts (mods.sh: PKG and mod installs) are needed before any game has started:
@@ -491,7 +508,9 @@ public final class MainActivity extends Activity {
             // The runtime brought bbport.default.ini: settings defaults apply before the game reads bbport.ini.
             try { SettingsDefaults.apply(new File(BASE)); main.post(() -> { if (drawerOpen) refreshDrawer(); }); }
             catch (Exception ex) { android.util.Log.e("Bloodborne","default settings: "+ex); }
-            if (!new File(ROOT,"usr/bin/Xvfb").canExecute() || !new File(BASE,"run-thor.sh").isFile())
+            boolean bionic=bionicRuntime();
+            if (!new File(ROOT,"usr/bin/Xvfb").canExecute() || !new File(BASE,"run-thor.sh").isFile()
+                    || bionic && (!new File(BASE,"bionic/bin/bb-probe").canExecute() || !new File(BASE,"run-bionic.sh").isFile()))
                 throw new java.io.IOException("The Bloodborne runtime is missing. Install the runtime bundle.");
             new File(FILES,"home/bbport").mkdirs();
             try (PrintWriter passwd=new PrintWriter(new File(ROOT,"etc/passwd"));
@@ -501,6 +520,16 @@ public final class MainActivity extends Activity {
                 passwd.println("user:x:"+uid+":"+uid+":Bloodborne:"+FILES+"/home/bbport:"+ROOT+"/bin/sh");
                 group.println("root:x:0:"); group.println("user:x:"+uid+":");
             }
+            if (bionic) {
+                // No X server: the game presents through the app (BB_PRESENT_SOCKET). shmid>=0 marks the display ready.
+                shmid=0;
+                main.post(() -> attach(holder));
+            } else startXServer(holder);
+        } catch (Exception ex) { error(ex.toString()); }
+    }
+    /** The glibc runtime's display: the shared memory daemon and Xvfb, whose frame the display bridge shows. */
+    private void startXServer(SurfaceHolder holder) throws Exception {
+        {
             new File(ROOT,"tmp/.X0-lock").delete(); new File(ROOT,"tmp/.X11-unix/X0").delete();
             // The shared memory daemon (Xvfb's frame, the display bridge): forks itself and stays.
             Process shmd=process(ROOT+"/usr/libexec/fxshmd","--dir",ROOT+"/tmp/.fxshm");
@@ -525,7 +554,7 @@ public final class MainActivity extends Activity {
                     catch (Exception ignored) {} },"X11-log");
                 drain.setDaemon(true); drain.start();
             }
-        } catch (Exception ex) { error(ex.toString()); }
+        }
     }
     private void attach(SurfaceHolder holder) {
         if (destroyed || !holder.getSurface().isValid()) return;
@@ -855,10 +884,11 @@ public final class MainActivity extends Activity {
     }
     // ---- GPU driver: the bundled Turnip or one installed from a zip (DriverManager, run-thor.sh) ----
     private void showDrivers() {
+        drivers.bionic=bionicRuntime();
         java.util.List<DriverManager.Driver> list=drivers.list();
         DriverManager.Driver current=drivers.find(setting("gpu_driver"));
         String[] names=new String[list.size()+1];
-        names[0]="Built-in Turnip (automatic by GPU)";
+        names[0]=drivers.bionic ? "System driver (stock)" : "Built-in Turnip (automatic by GPU)";
         int checked=0;
         for (int i=0;i<list.size();++i) {
             names[i+1]=list.get(i).title();
@@ -880,6 +910,7 @@ public final class MainActivity extends Activity {
     }
     /** A driver comes from the app's GitHub releases or from a zip on the device. */
     private void askAddDriver() {
+        drivers.bionic=bionicRuntime();
         new AlertDialog.Builder(this).setTitle("Add a GPU driver")
             .setItems(new String[]{"Download from GitHub","Install a zip from this device"},(d,which) -> {
                 if (which==0) showDriverDownloads(); else askDriverZip();
@@ -896,11 +927,16 @@ public final class MainActivity extends Activity {
         });
         driverDownload.show();
     }
-    /** The bundled Turnip that suits this GPU, as run-thor.sh chooses it from kgsl-chip-id's output
+    /** The GPU family, as run-thor.sh chooses its bundled Turnip from kgsl-chip-id's output
      *  (0x44... is Adreno 8xx): "gen8", "main", or null when the GPU cannot be read. Blocks. */
     private String gpuVariant() {
         try {
-            Process p=process(BASE+"/arm64/bin/kgsl-chip-id");
+            Process p;
+            if (bionicRuntime()) { // a Bionic program: none of the glibc runtime's library paths
+                ProcessBuilder b=new ProcessBuilder(BASE+"/bionic/bin/kgsl-chip-id").redirectErrorStream(true);
+                b.environment().remove("LD_LIBRARY_PATH"); b.environment().remove("LD_PRELOAD");
+                p=b.start();
+            } else p=process(BASE+"/arm64/bin/kgsl-chip-id");
             try {
                 if (!p.waitFor(5,java.util.concurrent.TimeUnit.SECONDS)) return null;
                 String line=new BufferedReader(new InputStreamReader(p.getInputStream())).readLine();
@@ -914,8 +950,14 @@ public final class MainActivity extends Activity {
     }
     private void askDriverZip() {
         new AlertDialog.Builder(this).setTitle("Install a GPU driver")
-            .setMessage("Choose a zip with a Linux (glibc) build of Turnip, such as the Turnip builds for "
-                +"Winlator or Mobox. Turnip for Android (adrenotools zips) cannot load here.\n\n"
+            .setMessage(drivers.bionic
+                ? "Choose a zip with a Turnip (or other Vulkan driver) built for Android, as the adrenotools "
+                +"driver packs are: a meta.json with the library's name, and the .so. Linux (glibc) builds do not "
+                +"load in this runtime.\n\nA driver you install replaces the phone's stock driver. "
+                +"If the game stops, choose System driver again."
+                : "Choose a zip with a Linux (glibc) build of Turnip, such as the Turnip builds for "
+                +"Winlator or Mobox. Turnip for Android (adrenotools zips) cannot load in this runtime; "
+                +"switch the runtime to Bionic in the graphics settings for those.\n\n"
                 +"Drivers without this app's Mesa patches show the picture through X11, which is slower, and "
                 +"may not work with Lossless Scaling. A driver you install turns off the automatic choice of Turnip by GPU. "
                 +"If the game stops, choose Built-in Turnip again.")
@@ -960,24 +1002,28 @@ public final class MainActivity extends Activity {
         },"Driver-install");
         install.setDaemon(true); install.start();
     }
-    /** Picks the driver for the next start (null: the bundled Turnip) and offers the restart. */
+    /** Picks the driver for the next start (null: the system driver / the bundled Turnip) and offers the restart.
+     *  Bionic writes "system" for none; glibc, empty. */
     private void useDriver(DriverManager.Driver driver) {
-        String id=driver==null ? "" : driver.id, before=setting("gpu_driver");
-        if (id.equals(before==null ? "" : before)) return;
+        boolean bionic=bionicRuntime();
+        String id=driver==null ? bionic ? "system" : "" : driver.id, before=setting("gpu_driver");
+        if (before==null || before.equals("system") && !bionic) before="";
+        if (bionic && before.isEmpty()) before="system";
+        if (id.equals(before)) return;
         if (!new SettingsDialog(this,new File(BASE,"bbport.ini"),this::restartGame).set("gpu_driver",id)) {
             toast("Could not save the GPU driver setting."); return;
         }
-        askRestart(driver==null ? "the built-in Turnip" : driver.title());
+        askRestart(driver==null ? bionic ? "the system driver" : "the built-in Turnip" : driver.title());
     }
     private void deleteDriver(DriverManager.Driver driver) {
         new AlertDialog.Builder(this).setTitle("Delete "+driver.title()+"?")
             .setNegativeButton("Cancel",(d,w) -> showDrivers())
             .setPositiveButton("Delete",(d,w) -> {
                 boolean active=driver.id.equals(setting("gpu_driver"));
-                if (active) new SettingsDialog(this,new File(BASE,"bbport.ini"),this::restartGame).set("gpu_driver","");
+                if (active) new SettingsDialog(this,new File(BASE,"bbport.ini"),this::restartGame).set("gpu_driver",bionicRuntime() ? "system" : "");
                 try { drivers.delete(driver.id); }
                 catch (Exception ex) { toast("Could not delete the driver: "+ex.getMessage()); return; }
-                if (active) askRestart("the built-in Turnip"); else showDrivers();
+                if (active) askRestart(bionicRuntime() ? "the system driver" : "the built-in Turnip"); else showDrivers();
             }).show();
     }
     private void toast(String message) { android.widget.Toast.makeText(this,message,android.widget.Toast.LENGTH_LONG).show(); }
@@ -1028,11 +1074,20 @@ public final class MainActivity extends Activity {
         if (destroyed) return;
         hadError=false;
         pickRefreshRate();
-        customDriver=drivers.find(setting("gpu_driver"))!=null;
+        boolean bionic=bionicRuntime();
+        drivers.bionic=bionic;
+        customDriver=!bionic && drivers.find(setting("gpu_driver"))!=null; // only the X11 present is uncounted
         gameStartedAt=android.os.SystemClock.uptimeMillis();
         new File(BASE,"ime.request").delete(); new File(BASE,"ime.request.result").delete();
         try {
-            Process launched=process(ROOT+"/bin/sh",BASE+"/run-thor.sh","game"); game=launched;
+            Process launched;
+            if (bionic) {
+                // The surface's size in pixels: the present target of libbbgpu (BB_SCREEN_W/H).
+                int w=surface.getWidth(), h=surface.getHeight();
+                launched=process(new String[]{"BB_SCREEN_W="+(w>0 ? w : 1280),"BB_SCREEN_H="+(h>0 ? h : 720)},
+                    ROOT+"/bin/sh",BASE+"/run-bionic.sh","game");
+            } else launched=process(ROOT+"/bin/sh",BASE+"/run-thor.sh","game");
+            game=launched;
             Thread log=new Thread(() -> {
                 try (BufferedReader r=new BufferedReader(new InputStreamReader(launched.getInputStream()));
                      PrintWriter out=new PrintWriter(new File(BASE,"logs/android-game.log"))) {

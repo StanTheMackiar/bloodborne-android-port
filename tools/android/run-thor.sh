@@ -13,76 +13,11 @@ export FEX_APP_CONFIG_LOCATION="$HOME/.fex-emu/"
 export FEX_APP_DATA_LOCATION="$HOME/.fex-emu/"
 export FEX_APP_CACHE_LOCATION="$HOME/.cache/fex-emu/"
 export GLIBC_TUNABLES='glibc.cpu.hwcaps=-AVX2,-AVX,-AVX_Fast_Unaligned_Load,-AVX2_Usable,-AVX_Usable'
-export BB_CONFIG="$base/bbport.ini"
-[ -f "$BB_CONFIG" ] || cp "$base/bbport.default.ini" "$BB_CONFIG"
-setting() { sed -n "s/^$1=//p" "$BB_CONFIG" 2>/dev/null | tail -n 1; }
-# The GPU driver. One the player installed from a zip (the app's GPU driver menu, DriverManager.java)
-# turns the automatic choice off: drivers/<gpu_driver>/icd.json names its library there, the zip's
-# other libraries beside it. Without one (gpu_driver empty or not installed), the bundled Turnip by
-# GPU: Mesa main for Adreno 6xx/7xx (the Thor's 740, chip id 0x43...), the turnip/gen8 build on
-# Adreno 8xx (0x44..., e.g. the 8 Elite's 830). BB_TURNIP=main|gen8 overrides that choice.
-gpu_driver=$(setting gpu_driver)
-case $gpu_driver in .*|*/*) gpu_driver= ;; esac
-if [ -n "$gpu_driver" ] && [ -f "$files/drivers/$gpu_driver/icd.json" ]; then
-    icd="$files/drivers/$gpu_driver/icd.json"
-    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}$files/drivers/$gpu_driver"
-    echo "GPU driver: $gpu_driver (installed from a zip, automatic choice off)"
-else
-    [ -n "$gpu_driver" ] && echo "GPU driver $gpu_driver is not installed: automatic choice"
-    turnip=${BB_TURNIP:-}
-    if [ -z "$turnip" ]; then
-        case $("$base/arm64/bin/kgsl-chip-id" 2>/dev/null || true) in
-            0x44*) turnip=gen8 ;;
-            *) turnip=main ;;
-        esac
-    fi
-    icd="$host/usr/share/vulkan/icd.d/freedreno_icd.aarch64.json"
-    [ "$turnip" = gen8 ] && [ -f "$host/usr/share/vulkan/icd.d/freedreno_gen8_icd.aarch64.json" ] &&
-        icd="$host/usr/share/vulkan/icd.d/freedreno_gen8_icd.aarch64.json"
-    echo "Turnip: ${icd##*/}"
-fi
-export VK_DRIVER_FILES="$icd"
-export VK_ICD_FILENAMES="$VK_DRIVER_FILES"
-if [ "${BB_ANDROID_INPUT:-0}" = 1 ]; then
-    export BB_PAD_FILE="$base/android-pad.state" BB_PAD_QUIET=1
-    # Text the game asks for (the character name): the app's touch keyboard.
-    export BB_IME_FILE="$base/ime.request"
-    # Sound: SDL's disk driver mixes into the FIFO the app plays (AudioBridge.java). Only when the
-    # app made it: a FIFO nobody reads would stall the game's audio. Its reads pace the output.
-    if [ -p "$base/audio.fifo" ]; then
-        export SDL_AUDIO_DRIVER=disk SDL_AUDIO_DISK_OUTPUT_FILE="$base/audio.fifo"
-        export SDL_AUDIO_DISK_TIMESCALE=0 SDL_AUDIO_DEVICE_SAMPLE_FRAMES=512
-    fi
-fi
-# Graphics settings (the app's settings screen writes bbport.ini). The output is the Thor's
-# 1280x720 display; the preset sets the scene size, FSR 3.1 upscales it to the output.
-upscaler=$(setting upscaler); preset=$(setting preset)
-# FSR 4 and 4.1.1 (INT8 models) are not offered: on the Thor's Adreno 740 FSR 4 took ~3 min to
-# compile in Turnip, then ran at 2.4 FPS (~470 ms of GPU time a frame) with a black scene, and with
-# the Lossless Scaling layer it crashed in Turnip. Any value but off means FSR 3.1.
-case $upscaler in off) ;; *) upscaler=fsr3 ;; esac
-echo "Upscaler setting: $upscaler"
-case $preset in 0|1|2|3|4) ;; *) preset=3 ;; esac
-render=1280x720
-if [ "$upscaler" != off ]; then
-    case $preset in 1) render=854x480 ;; 2) render=752x424 ;; 3) render=640x360 ;; 4) render=426x240 ;; esac
-fi
-export BB_FULLSCREEN=1 BB_UPSCALER=$upscaler BB_UPSCALE_PRESET=$preset
-# FSR 3.1 frame generation (frame_generation=1): a frame between each two, with FSR 3.1 only.
-[ "$(setting frame_generation)" = 1 ] && [ "$upscaler" = fsr3 ] && export BB_FRAME_GEN=1
-# The GPU's check of indirect dispatch counts (upstream 0.5, vk_indirect_guard.h) is off: it was
-# suspected of 0.5.0's hangs on the Thor (those came from the Lossless Scaling layer's later
-# changes, undone in 0.5.1) and is not tested here on its own. BB_INDIRECT_GUARD=1 in
-# thor-local.sh turns it on.
-export BB_INDIRECT_GUARD=${BB_INDIRECT_GUARD:-0}
-# The two-stage draw pipeline (bb:DrawRec) turns itself on only with 8 or more CPUs the game may
-# use, so thor_cpus=3-7 turned it off. On, it frees the GPU command thread: 31 -> 34 FPS on the
-# Thor with all cores. BB_DRAW_PIPE=0 in thor-local.sh turns it off.
-export BB_DRAW_PIPE=${BB_DRAW_PIPE:-1}
 # Lossless Scaling frame generation (lsfg_multiplier 2-4): the lsfg-vk 1.0 layer with our Turnip
 # patches (bbport/arm64/lsfg, build_lsfg.sh) and Lossless.dll from the player's own Lossless
 # Scaling (Steam), next to the game folder or in bbport/. It replaces FSR 3.1 frame generation.
 # Its messages (lsfg-vk: ...) go to the game log.
+bb_lsfg() {
 lsfg=$(setting lsfg_multiplier)
 case $lsfg in 2|3|4) ;; *) lsfg= ;; esac
 if [ -n "$lsfg" ] && [ -f "$base/arm64/lsfg/VkLayer_LS_frame_generation.json" ]; then
@@ -123,29 +58,41 @@ EOF
 else
     lsfg=
 fi
-[ -n "$lsfg" ] || rm -f "$base/lsfg-vk.toml"
-# FSR 4 model assets (fetch_fsr4_assets.sh), in the native bundle when fetched.
-[ -d "$base/arm64/fsr4_shaders" ] && export BB_FSR4_DIR="$base/arm64/fsr4_shaders"
-export BB_WINDOW_SIZE=1280x720
-export BB_RENDER_RES=$render BB_OUTPUT_RES=1280x720 BB_LIVE_RES=0
-export BB_DMEM_MB=5056 BB_PREUPLOAD=0 BB_GUEST_IN_PLACE=0 BB_UFFD=0
-export BB_COPY_GPU_BUFFERS=1 BB_GPU_WRITE_TWINS=1 BB_GPU_WRITE_TWINS_MAX=65536
-# GPU memory is the Thor's system RAM, shared with the game's 5 GB and Android: the texture
-# collector works to a 4 GB budget instead of the driver's 11 GB heap (the app was killed for
-# memory once the world loaded), and idle copies of game memory go after 20 s instead of 60 s.
-export BB_GC_BUDGET_MB=${BB_GC_BUDGET_MB:-4096} BB_VRAM_IDLE_SECONDS=${BB_VRAM_IDLE_SECONDS:-20}
-# FPS limit (fps_limit): 30 is the game's own timing; above it the delta-time patch
-# (fps=uncap.bin) with presents at once (vblank 480 Hz, as run.sh) and BB_FPS_LIMIT (0: none).
-fps_limit=$(setting fps_limit)
-case $fps_limit in 40|45|60|0) export BB_VBLANK_HZ=480 BB_FPS_LIMIT=$fps_limit ;;
-    *) fps_limit=30; export BB_VBLANK_HZ=60 ;; esac
-# Frame generation adds frames on screen only: at the game's own 30 FPS timing a slower frame
-# still slows the game down. With it, 30 means the delta-time patch at 30 real frames a second.
-if { [ "${BB_FRAME_GEN:-0}" = 1 ] || [ -n "$lsfg" ]; } && [ "$fps_limit" = 30 ]; then
-    fps_limit=30-delta; export BB_VBLANK_HZ=480 BB_FPS_LIMIT=30
+}
+. "$base/run-common.sh" # BB_CONFIG, setting, the graphics/fps/pad/mods settings (shared with run-bionic.sh)
+# The GPU driver. One the player installed from a zip (the app's GPU driver menu, DriverManager.java)
+# turns the automatic choice off: drivers/<gpu_driver>/icd.json names its library there, the zip's
+# other libraries beside it. Without one (gpu_driver empty or not installed), the bundled Turnip by
+# GPU: Mesa main for Adreno 6xx/7xx (the Thor's 740, chip id 0x43...), the turnip/gen8 build on
+# Adreno 8xx (0x44..., e.g. the 8 Elite's 830). BB_TURNIP=main|gen8 overrides that choice.
+gpu_driver=$(setting gpu_driver)
+case $gpu_driver in .*|*/*) gpu_driver= ;; esac
+if [ -n "$gpu_driver" ] && [ -f "$files/drivers/$gpu_driver/icd.json" ]; then
+    icd="$files/drivers/$gpu_driver/icd.json"
+    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}$files/drivers/$gpu_driver"
+    echo "GPU driver: $gpu_driver (installed from a zip, automatic choice off)"
+else
+    [ -n "$gpu_driver" ] && echo "GPU driver $gpu_driver is not installed: automatic choice"
+    turnip=${BB_TURNIP:-}
+    if [ -z "$turnip" ]; then
+        case $("$base/arm64/bin/kgsl-chip-id" 2>/dev/null || true) in
+            0x44*) turnip=gen8 ;;
+            *) turnip=main ;;
+        esac
+    fi
+    icd="$host/usr/share/vulkan/icd.d/freedreno_icd.aarch64.json"
+    [ "$turnip" = gen8 ] && [ -f "$host/usr/share/vulkan/icd.d/freedreno_gen8_icd.aarch64.json" ] &&
+        icd="$host/usr/share/vulkan/icd.d/freedreno_gen8_icd.aarch64.json"
+    echo "Turnip: ${icd##*/}"
 fi
-# CPU cores (thor_cpus, a taskset list such as 3-7): empty for all of them.
-[ -z "${BB_THOR_CPUS:-}" ] && BB_THOR_CPUS=$(setting thor_cpus)
+export VK_DRIVER_FILES="$icd"
+export VK_ICD_FILENAMES="$VK_DRIVER_FILES"
+# Sound: SDL's disk driver mixes into the FIFO the app plays (AudioBridge.java). Only when the
+# app made it: a FIFO nobody reads would stall the game's audio. Its reads pace the output.
+if [ "${BB_ANDROID_INPUT:-0}" = 1 ] && [ -p "$base/audio.fifo" ]; then
+    export SDL_AUDIO_DRIVER=disk SDL_AUDIO_DISK_OUTPUT_FILE="$base/audio.fifo"
+    export SDL_AUDIO_DISK_TIMESCALE=0 SDL_AUDIO_DEVICE_SAMPLE_FRAMES=512
+fi
 # Diagnostics stay off in releases: BB_FRAME_STATS (per-frame timers and stall logs; any value
 # turns them on) and BB_PRESENT_DUMP_TRIGGER go in thor-local.sh when needed.
 export SDL_VIDEODRIVER=x11 DISPLAY=:0
@@ -190,37 +137,7 @@ case ${1:-game} in
         exec "$host/usr/bin/FEX" "$base/bin/bb-probe" "$base/data/cpu-fixture.bin" --timeout 60
         ;;
     game)
-        # The game folder chosen in the app (shared storage), else the bundle's own.
-        game_dir=${BB_GAME_DIR:-$base/game}
-        [ -f "$game_dir/eboot.bin" ] || { echo "Game missing: $game_dir"; exit 2; }
-        if [ -x "$host/usr/bin/python3.13" ]; then
-            PYTHONHOME="$host/usr" "$host/usr/bin/python3.13" \
-                "$base/scripts/prepare_game.py" "$game_dir" "$base/data"
-        elif [ ! -f "$base/data/boot-linked.bin" ]; then
-            echo 'Python runtime missing; cannot prepare the selected game files' >&2
-            exit 2
-        fi
-        # Loose-file mods (mods_enabled, default on): a symlink overlay of the game folder, built
-        # after prepare_game.py (it needs the original eboot). mods_android.py prints the folder to
-        # run (the overlay, or the game itself when no valid enabled mod); it never fails the launch.
-        mods_dir=$(setting mods_dir)
-        [ -n "$mods_dir" ] || mods_dir=/storage/emulated/0/Bloodborne/mods
-        export BB_MODS_DIR="$mods_dir"
-        [ -n "${BB_MOD_TRACE:-}" ] && export BB_MOD_TRACE
-        app0_dir=$game_dir
-        if [ "$(setting mods_enabled)" != 0 ] && [ -x "$host/usr/bin/python3.13" ]; then
-            mods_game=$(PYTHONHOME="$host/usr" "$host/usr/bin/python3.13" "$base/scripts/mods_android.py" apply \
-                --game "$game_dir" --out "$base/mod-game" --mods-dir "$mods_dir" \
-                --config "$base/mods.json" | tail -n 1) || mods_game=
-            if [ -n "$mods_game" ] && [ -f "$mods_game/eboot.bin" ]; then
-                app0_dir=$mods_game
-            else
-                echo 'Mods: could not be set up, starting without them'
-            fi
-        else
-            echo 'Mods: off'
-        fi
-        [ "$app0_dir" = "$game_dir" ] && rm -rf "$base/mod-game"
+        bb_prepare_game
         # The native ARM64 build (runtime and GPU native, the game's code in FEXCore) when it is
         # installed; BB_THOR_X86=1: the whole x86-64 loader under FEX instead.
         if [ -x "$base/arm64/bin/bb-probe" ] && [ "${BB_THOR_X86:-0}" != 1 ]; then
@@ -235,24 +152,8 @@ case ${1:-game} in
         # takes several), else the bundle's single file.
         parts="$base/arm64/patch-parts"
         if [ "$native" = 1 ] && [ -d "$parts" ]; then
-            set -- "$@" "$base/data/boot-linked.bin" --patches "$parts/res-$render.bin"
-            for key in effect_chromatic_aberration effect_dof effect_motion_blur effect_ssao \
-                       effect_game_aa effect_dynamic_shadows effect_ssr skip_intro debug_camera debug_menu model_lod; do
-                value=$(setting "$key")
-                [ -f "$parts/$key=$value.bin" ] && set -- "$@" --patches "$parts/$key=$value.bin"
-            done
-            [ "$fps_limit" != 30 ] && set -- "$@" --patches "$parts/fps=uncap.bin"
-            # No PSN here: the title screen goes straight to the main menu offline.
-            [ "$(setting skip_network_choice)" != 0 ] && [ -f "$parts/skip_network_choice=1.bin" ] &&
-                set -- "$@" --patches "$parts/skip_network_choice=1.bin"
-            # Cheats (the app's Cheats menu): their hooks are always in, switched live by the flags
-            # BB_CHEATS_FILE holds (the app rewrites it; here its start, from bbport.ini).
-            if [ -f "$parts/cheats.bin" ]; then
-                set -- "$@" --patches "$parts/cheats.bin"
-                export BB_CHEATS_FILE="$base/cheats.state"
-                printf '%s%s\n' "$([ "$(setting cheat_health)" = 1 ] && echo 1 || echo 0)" \
-                    "$([ "$(setting cheat_items)" = 1 ] && echo 1 || echo 0)" > "$BB_CHEATS_FILE"
-            fi
+            bb_patch_args
+            set -- "$@" "$base/data/boot-linked.bin" $patch_args
         else
             set -- "$@" "$base/data/boot-linked.bin" --patches "$base/data/patches.bin"
         fi

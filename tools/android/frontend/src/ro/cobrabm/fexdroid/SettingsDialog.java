@@ -55,6 +55,10 @@ final class SettingsDialog {
         {"cheat_items","Infinite blood vials and items","Using a blood vial, bullet or other item leaves its count as it was "
             +"(items moved to storage or given away stay too)","0"},
     };
+    /** bbport.ini runtime=: the process the game runs in. Bionic (default): the Android build, stock or Android drivers
+     *  (run-bionic.sh); glibc: the Linux build with Turnip (run-thor.sh). */
+    private static final String[] RUNTIME_VALUES={"bionic","glibc"};
+    private static final String[] RUNTIME_NAMES={"Bionic (stock / Android drivers)","Linux (glibc, Turnip)"};
     private static final String[] UPSCALER_VALUES={"off","fsr3"};
     private static final String[] UPSCALER_NAMES={"Off (render at 1280×720)","FSR 3.1"};
     private static final int FSR3=1;
@@ -177,6 +181,13 @@ final class SettingsDialog {
         LinearLayout box=new LinearLayout(activity); box.setOrientation(LinearLayout.VERTICAL);
         box.setPadding(dp(24),dp(4),dp(24),dp(8));
 
+        heading(box,"Runtime");
+        final RadioGroup runtimes=choices(box,RUNTIME_NAMES,indexOf(RUNTIME_VALUES,get("runtime","bionic"),0));
+        TextView runtimeNote=new TextView(activity); runtimeNote.setTextSize(13); runtimeNote.setAlpha(0.7f);
+        runtimeNote.setText("Bionic runs the game as an Android program with the phone's own Vulkan driver or an "
+            +"Android Turnip you add. Linux runs it in the bundled Linux system with Turnip. Changing it restarts the app's display.");
+        box.addView(runtimeNote);
+
         heading(box,"Upscaling (to 1280×720)");
         final RadioGroup upscalers=choices(box,UPSCALER_NAMES,indexOf(UPSCALER_VALUES,get("upscaler","fsr3"),1));
         heading(box,"Render resolution");
@@ -247,6 +258,7 @@ final class SettingsDialog {
             .setNegativeButton("Cancel",null)
             .setPositiveButton("Apply & restart",(d,w) -> {
                 Map<String,String> changed=new LinkedHashMap<>();
+                changed.put("runtime",RUNTIME_VALUES[Math.max(0,checkedIndex(runtimes))]);
                 changed.put("upscaler",UPSCALER_VALUES[Math.max(0,checkedIndex(upscalers))]);
                 changed.put("fps_limit",FPS_VALUES[Math.max(0,checkedIndex(fpsLimit))]);
                 changed.put("frame_generation",frameGen.isChecked() && checkedIndex(upscalers)!=0 ? "1" : "0");
@@ -266,7 +278,10 @@ final class SettingsDialog {
         boolean same=true;
         for (Map.Entry<String,String> e:changed.entrySet()) if (!e.getValue().equals(values.get(e.getKey()))) same=false;
         if (same) return;
-        if (save(changed)) restart.run();
+        // A runtime change needs the display of the other runtime (the X server is only for Linux): the
+        // activity starts over, which also stops the game.
+        boolean runtimeChanged=changed.containsKey("runtime") && !changed.get("runtime").equals(get("runtime","bionic"));
+        if (save(changed)) { if (runtimeChanged) activity.recreate(); else restart.run(); }
         else new AlertDialog.Builder(activity).setMessage("The settings could not be saved.").setPositiveButton("OK",null).show();
     }
 

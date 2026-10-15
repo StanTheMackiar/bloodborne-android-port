@@ -61,7 +61,12 @@ run ninja -C "$out/gpu" -j "$J" bbgpu > "$out/gpu-build.log" 2>&1 || { grep -v '
 # Layout as the glibc app: bin/ and lib/ side by side, executables find lib/ through $ORIGIN.
 mkdir -p "$out/bin" "$out/lib"
 cp -f "$out/fex/libbbcpu.so" "$out/gpu/libbbgpu.so" "$out/lib/"
-cp -f "$prefix/lib/libSDL3.so" "$out/lib/"
+# libSDL3.so only while libbbgpu still links it (the AHardwareBuffer present path removes that);
+# bb-probe does not: src/ is built with BB_NO_SDL on Android (audio to the app's FIFO, pad from BB_PAD_FILE).
+rm -f "$out/lib/libSDL3.so"
+if "$llvm/bin/llvm-readelf" -d "$out/lib/libbbgpu.so" | grep -q 'libSDL3'; then
+    cp -f "$prefix/lib/libSDL3.so" "$out/lib/"
+fi
 cp -f "$llvm/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" "$out/lib/"
 
 cc=("$llvm/bin/aarch64-linux-android$api-clang" -fuse-ld=lld)
@@ -73,7 +78,7 @@ done
 # PIE (Android requires it; the glibc build is -no-pie for its brk heap, see src/probe.c main),
 # -rdynamic: libbbgpu resolves runtime_* symbols against the executable. Linked against the NDK
 # sysroot only: no libvulkan, no loader of ours.
-links=(-L"$out/lib" -lbbgpu -lbbcpu -lSDL3 -Wl,-rpath,'$ORIGIN/../lib' -rdynamic -pie)
+links=(-L"$out/lib" -lbbgpu -lbbcpu -Wl,-rpath,'$ORIGIN/../lib' -rdynamic -pie)
 "${cc[@]}" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I"$prefix/include" -I. -Isrc \
     src/probe.c src/runtime*.c src/vulkan_smoke.c "$out/libatrac9.a" -lm "${links[@]}" \
     -o "$out/bin/bb-probe"
