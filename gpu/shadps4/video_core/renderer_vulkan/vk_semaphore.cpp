@@ -48,6 +48,24 @@ void Semaphore::Refresh() {
                                              std::memory_order_relaxed));
 }
 
+bool Semaphore::WaitFor(u64 tick, u64 timeout_ns) {
+    if (IsFree(tick)) {
+        return true;
+    }
+    const vk::SemaphoreWaitInfo wait_info = {
+        .semaphoreCount = 1,
+        .pSemaphores = &semaphore.get(),
+        .pValues = &tick,
+    };
+    const vk::Result result = instance.GetDevice().waitSemaphores(&wait_info, timeout_ns);
+    if (result == vk::Result::eErrorDeviceLost) {
+        Breadcrumbs::ReportDeviceLost("waiting for a submission");
+        ASSERT_MSG(false, "Device lost while waiting for a submission");
+    }
+    Refresh();
+    return result == vk::Result::eSuccess;
+}
+
 void Semaphore::Wait(u64 tick) {
     // No need to wait if the GPU is ahead of the tick
     if (IsFree(tick)) {

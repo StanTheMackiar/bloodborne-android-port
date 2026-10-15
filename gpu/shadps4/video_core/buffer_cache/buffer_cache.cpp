@@ -3631,6 +3631,10 @@ void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
             std::printf("Guest memory: vkQueueBindSparse of %llu ranges took %.0f ms in the driver\n",
                         (unsigned long long)ranges, bind_ms);
         }
+        if (submit_result != vk::Result::eSuccess) {
+            std::printf("Guest memory: vkQueueBindSparse of %llu ranges refused: %s\n",
+                        (unsigned long long)ranges, vk::to_string(submit_result).c_str());
+        }
         if (submit_result == vk::Result::eErrorDeviceLost) {
             Vulkan::Breadcrumbs::ReportDeviceLost("submit");
         }

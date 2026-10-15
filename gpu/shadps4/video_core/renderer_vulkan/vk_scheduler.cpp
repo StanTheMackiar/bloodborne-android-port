@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <cstring>
 #include <string>
+#include <pthread.h>
 #include <dlfcn.h>
 #include "bbport_backtrace.h"
 #include <unistd.h>
@@ -248,7 +249,16 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
         return;
     }
     // The attachment infos live on this stack frame: the recorded closure keeps copies.
-    Record([info = rendering_info, color_attachments, depth_attachment,
+    // bbport: a breadcrumb (when on) says whether the GPU got to the pass and into it.
+    const Breadcrumbs::Crumb crumb{
+        .kind = Breadcrumbs::Kind::Pass,
+        .name = "begin rendering",
+        .hash = {u64(db.has_depth) | u64(db.has_stencil) << 1 | u64(db.depth_clear) << 2 |
+                     u64(db.stencil_clear) << 3,
+                 render_state.num_layers},
+        .count = {render_state.width, render_state.height, render_state.num_color_attachments},
+    };
+    RecordCrumb(crumb, [info = rendering_info, color_attachments, depth_attachment,
             stencil_attachment](vk::CommandBuffer cmdbuf) mutable {
         info.pColorAttachments = color_attachments.data();
         if (info.pDepthAttachment) {
@@ -1289,6 +1299,21 @@ void Scheduler::Finish() {
     Wait(presubmit_tick);
 }
 
+namespace {
+/// The last submissions of every scheduler (they share the queue): reported by a stalled wait.
+struct SubmissionTrace {
+    const Scheduler* scheduler = nullptr;
+    u64 tick = 0;
+    vk::Result result{};
+    u32 num_waits = 0;
+    std::array<vk::Semaphore, 4> waits{};
+    std::array<u64, 4> wait_ticks{};
+};
+std::array<SubmissionTrace, 16> submission_trace{};
+u32 submission_trace_next = 0;
+std::mutex submission_trace_mutex;
+} // namespace
+
 void Scheduler::Wait(u64 tick) {
     if (tick >= work_semaphore.CurrentTick()) {
         // Make sure we are not waiting for the current tick without signalling
@@ -1297,7 +1322,74 @@ void Scheduler::Wait(u64 tick) {
     }
     BbWaitTrace::Scope trace;
     BbStats::WaitTimer timer{BbStats::tick_wait_ns};
-    work_semaphore.Wait(tick);
+    // bbport: a wait that takes seconds is a stuck GPU or submission: say what is outstanding.
+    if (!work_semaphore.WaitFor(tick, 5'000'000'000ull)) {
+        char thread[16] = {};
+        pthread_getname_np(pthread_self(), thread, sizeof(thread));
+        std::printf("GPU wait stalled 5 s on %s: tick %llu, GPU at %llu, submitted %llu, next "
+                    "%llu\n",
+                    thread, static_cast<unsigned long long>(tick),
+                    static_cast<unsigned long long>(work_semaphore.KnownGpuTick()),
+                    static_cast<unsigned long long>(submitted_tick.load()),
+                    static_cast<unsigned long long>(work_semaphore.CurrentTick()));
+        {
+            std::scoped_lock lk{submission_trace_mutex};
+            for (u32 n = 0; n < submission_trace.size(); ++n) {
+                const auto& trace =
+                    submission_trace[(submission_trace_next + n) % submission_trace.size()];
+                if (trace.tick == 0) {
+                    continue;
+                }
+                const bool own = trace.scheduler == this;
+                if (own && trace.tick < work_semaphore.KnownGpuTick()) {
+                    continue;
+                }
+                // The other scheduler's timeline, read now.
+                const u64 done = own ? work_semaphore.KnownGpuTick()
+                                     : instance.GetDevice()
+                                           .getSemaphoreCounterValue(
+                                               trace.scheduler->work_semaphore.Handle())
+                                           .value;
+                std::printf("  %s submission %llu (%s, its timeline at %llu) waits:",
+                            own ? "this" : "other", static_cast<unsigned long long>(trace.tick),
+                            vk::to_string(trace.result).c_str(),
+                            static_cast<unsigned long long>(done));
+                for (u32 i = 0; i < trace.num_waits; ++i) {
+                    u64 value = 0;
+                    // Binary semaphores (tick 1) cannot be queried.
+                    const bool timeline = trace.wait_ticks[i] > 1;
+                    if (timeline) {
+                        value = instance.GetDevice().getSemaphoreCounterValue(trace.waits[i]).value;
+                    }
+                    std::printf(" %p@%llu (at %s)", static_cast<void*>(VkSemaphore(trace.waits[i])),
+                                static_cast<unsigned long long>(trace.wait_ticks[i]),
+                                timeline ? std::to_string(value).c_str() : "binary");
+                }
+                std::printf("\n");
+            }
+        }
+        std::fflush(stdout);
+        Breadcrumbs::ReportStuck("a wait stalled 5 s");
+        work_semaphore.Wait(tick);
+    }
+}
+
+
+void Scheduler::NoteSubmission(u64 tick, const SubmitInfo& info, vk::Result result) {
+    if (result != vk::Result::eSuccess) {
+        std::printf("GPU submission %llu refused by the driver: %s\n",
+                    static_cast<unsigned long long>(tick), vk::to_string(result).c_str());
+    }
+    std::scoped_lock lk{submission_trace_mutex};
+    auto& trace = submission_trace[submission_trace_next++ % submission_trace.size()];
+    trace.scheduler = this;
+    trace.tick = tick;
+    trace.result = result;
+    trace.num_waits = std::min<u32>(info.num_wait_semas, u32(trace.waits.size()));
+    for (u32 i = 0; i < trace.num_waits; ++i) {
+        trace.waits[i] = info.wait_semas[i];
+        trace.wait_ticks[i] = info.wait_ticks[i];
+    }
 }
 
 void Scheduler::PopPendingOperations() {
@@ -1455,6 +1547,7 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     }
     ImGui::Core::TextureManager::Submit();
     auto submit_result = instance.GetGraphicsQueue().submit(submit_info, info.fence);
+    NoteSubmission(signal_value, info, submit_result);
     if (submit_result == vk::Result::eErrorDeviceLost) {
         Breadcrumbs::ReportDeviceLost("submit");
     }
@@ -1536,6 +1629,7 @@ void Scheduler::SubmitAsync(SubmitInfo& info) {
                 operation();
             }
             const auto result = instance.GetGraphicsQueue().submit(submit_info, info.fence);
+            NoteSubmission(signal_value, info, result);
             if (result == vk::Result::eErrorDeviceLost) {
                 Breadcrumbs::ReportDeviceLost("submit");
             }

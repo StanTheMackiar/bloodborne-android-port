@@ -156,6 +156,11 @@ public:
         return maintenance_8;
     }
 
+    /// bbport: vkResetQueryPool from the host (Vulkan 1.2 hostQueryReset).
+    bool IsHostQueryResetSupported() const {
+        return vk12_features.hostQueryReset;
+    }
+
     /// bbport: VK_AMD_buffer_marker (GPU breadcrumbs).
     bool IsBufferMarkerSupported() const {
         return buffer_marker;

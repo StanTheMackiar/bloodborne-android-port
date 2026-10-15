@@ -1291,6 +1291,8 @@ private:
     std::vector<SubmissionBatch*> free_batches; ///< guarded by recorder_mutex
     bool async_submit = false; ///< BB_ASYNC_SUBMIT (default on)
     std::atomic<u64> submitted_tick{0}; ///< the last tick handed to the queue (WaitSubmitted)
+    /// bbport: the last submissions and what they wait on, for the report of a stalled wait.
+    void NoteSubmission(u64 tick, const SubmitInfo& info, vk::Result result);
     u32 current_segment = 0;
     std::atomic<u32> active_worker{0}; ///< the worker of current_segment (it spins for work)
     size_t segment_bytes = 0;          ///< closures of the current segment handed over or retired
