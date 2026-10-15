@@ -142,7 +142,7 @@ final class SteamDllDialog implements IAuthenticator {
     }
 
     private void status(String text) {
-        android.util.Log.i("Bloodborne","Steam: "+(text.startsWith("Signed in as ") ? "signed in" : text)); // no account name
+        android.util.Log.i("Bloodborne","Steam: "+(text.startsWith("Signed in as ") ? "signed in" : safe(text))); // no account name
         main.post(() -> status.setText(text));
     }
     private void cancel() {
@@ -198,7 +198,7 @@ final class SteamDllDialog implements IAuthenticator {
             finished=true;
             status("Lossless.dll is ready. Turn on Lossless Scaling in the Graphics settings; it applies when the game restarts.");
         } catch (Throwable e) {
-            android.util.Log.w("Bloodborne","Steam: Lossless.dll download failed",e);
+            android.util.Log.w("Bloodborne","Steam: Lossless.dll download failed: "+safe(message(e))); // no stack: it can quote request URLs
             if (!finished) status(message(e));
         } finally {
             finished=true;
@@ -275,7 +275,7 @@ final class SteamDllDialog implements IAuthenticator {
                         return;
                     } catch (CancellationException e) { throw e;
                     } catch (Exception e) {
-                        android.util.Log.w("Bloodborne","Steam: content server "+server.getHost()+" failed",e);
+                        android.util.Log.w("Bloodborne","Steam: content server "+server.getHost()+" failed: "+safe(message(e)));
                         last=e; // the next content server
                     }
                 }
@@ -342,6 +342,9 @@ final class SteamDllDialog implements IAuthenticator {
         } catch (Exception e) { status("Could not show the QR code: "+e.getMessage()); }
     }
 
+    /** A log line without web addresses (a failed request can quote its URL, which can carry an access token): the
+     *  logs go into the problem report. */
+    private static String safe(String text) { return text.replaceAll("(?i)[a-z][a-z0-9+.-]*://\\S+","<url>"); }
     private static String message(Throwable e) {
         while ((e instanceof ExecutionException || e instanceof java.util.concurrent.CompletionException) && e.getCause()!=null)
             e=e.getCause();

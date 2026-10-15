@@ -67,6 +67,7 @@ public final class MainActivity extends Activity {
     private ModsDialog mods;
     private GameInstaller installer;
     private AppUpdater updater;
+    private ReportDialog report;
     private LinearLayout updateItem;
     /** Runs when the Lossless.dll picker returns (the graphics settings show the new state). */
     private Runnable dllDone;
@@ -89,6 +90,7 @@ public final class MainActivity extends Activity {
             @Override public void closed() { if (!destroyed) immersive(); }
             @Override public boolean destroyed() { return destroyed; }
         });
+        report=new ReportDialog(this,reportHost());
         worker.execute(updater::cleanup); // downloads an earlier run left
         gameDir=getSharedPreferences("bloodborne",MODE_PRIVATE).getString("game_dir",null);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
@@ -229,6 +231,7 @@ public final class MainActivity extends Activity {
 
         section("App");
         updateItem=menuItem("ic_refresh","Check for updates","Version "+updater.version(),() -> updater.check());
+        menuItem("ic_bug_report","Report a problem","Save logs for a GitHub issue",() -> { closeDrawer(); report.show(); });
 
         // The version, pinned under the scrolling menu.
         String version="";
@@ -623,10 +626,11 @@ public final class MainActivity extends Activity {
     // ---- Save data backup and restore (SaveBackup) ----
     private File savesDir() { return SaveBackup.saves(new File(BASE)); }
     private boolean gameRunning() { Process p=game; return p!=null && p.isAlive(); }
-    private boolean saveStorage() {
+    private boolean saveStorage() { return saveStorage(true); }
+    private boolean saveStorage(boolean explain) {
         if (Build.VERSION.SDK_INT<23 || checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
                 ==android.content.pm.PackageManager.PERMISSION_GRANTED) return true;
-        toast("Allow storage access first (it is asked when the game starts)."); return false;
+        if (explain) toast("Allow storage access first (it is asked when the game starts)."); return false;
     }
     private static final String STOP_NOTE="\n\nThe game is stopped for this and starts again afterwards; unsaved progress is lost.";
     private void backupSaves() {
@@ -678,6 +682,35 @@ public final class MainActivity extends Activity {
                 SaveBackup.restore(savesDir(),source);
                 return "Saves restored."+note;
             })).setOnDismissListener(d -> immersive()).show();
+    }
+    /** What the problem report needs from the app (see {@link ReportDialog}). */
+    private ReportDialog.Host reportHost() {
+        return new ReportDialog.Host() {
+            @Override public java.util.concurrent.Executor worker() { return worker; }
+            @Override public void post(Runnable r) { main.post(r); }
+            @Override public boolean destroyed() { return destroyed; }
+            @Override public void closed() { if (!destroyed) immersive(); }
+            @Override public File base() { return new File(BASE); }
+            @Override public File downloads() { return saveStorage(false) ? MainActivity.this.downloads() : null; }
+            @Override public LogReport.Facts facts() { return reportFacts(); }
+        };
+    }
+    /** Blocks (lists the mods). The game folder is shown by its last component only. */
+    private LogReport.Facts reportFacts() {
+        LogReport.Facts f=new LogReport.Facts();
+        if (gameDir!=null) { f.gameFolder=new File(gameDir).getName(); f.ebootFound=isGame(new File(gameDir)); }
+        DriverManager.Driver driver=drivers.find(setting("gpu_driver"));
+        f.driverLine=driver==null ? "system (stock)" : driver.title();
+        f.losslessDll=losslessDll()!=null;
+        if ("0".equals(setting("mods_enabled"))) f.modsLine="off";
+        else {
+            try {
+                int on=0, usable=0, bad=0;
+                for (ModManager.Mod m:modManager().list().mods) { if (m.valid) { ++usable; if (m.enabled) ++on; } else ++bad; }
+                f.modsLine=on+" enabled of "+usable+" usable"+(bad>0 ? ", "+bad+" not usable" : "");
+            } catch (Exception ex) { f.modsLine="unknown"; }
+        }
+        return f;
     }
     /** Runs a save data copy off the UI thread, then shows the result. With stop, the game (which writes the saves)
      *  is stopped for the copy and started again afterwards. */
@@ -894,20 +927,8 @@ public final class MainActivity extends Activity {
     /** The GPU family, from kgsl-chip-id's output (0x44... is Adreno 8xx): "gen8", "main", or null when the
      *  GPU cannot be read. The download list marks the Turnip build for it. Blocks. */
     private String gpuVariant() {
-        try {
-            ProcessBuilder b=new ProcessBuilder(BASE+"/bionic/bin/kgsl-chip-id").redirectErrorStream(true);
-            b.environment().remove("LD_LIBRARY_PATH"); b.environment().remove("LD_PRELOAD");
-            Process p=b.start();
-            try {
-                if (!p.waitFor(5,java.util.concurrent.TimeUnit.SECONDS)) return null;
-                String line=new BufferedReader(new InputStreamReader(p.getInputStream())).readLine();
-                if (line==null || !line.trim().startsWith("0x")) return null;
-                return line.trim().startsWith("0x44") ? "gen8" : "main";
-            } finally { p.destroyForcibly(); }
-        } catch (Exception ex) {
-            android.util.Log.w("Bloodborne","GPU detection: "+ex);
-            return null;
-        }
+        String id=LogReport.chipId(BASE);
+        return id==null ? null : id.startsWith("0x44") ? "gen8" : "main";
     }
     private void askDriverZip() {
         new AlertDialog.Builder(this).setTitle("Install a GPU driver")
@@ -1038,11 +1059,15 @@ public final class MainActivity extends Activity {
             // The surface's size in pixels: the present target of libbbgpu (BB_SCREEN_W/H).
             int w=surface.getWidth(), h=surface.getHeight();
             extra.add("BB_SCREEN_W="+(w>0 ? w : 1280)); extra.add("BB_SCREEN_H="+(h>0 ? h : 720));
+            // The last run's log stays as android-game.prev.log (one generation): a crash log survives the restart.
+            File gameLog=new File(BASE,"logs/android-game.log"), previous=new File(BASE,"logs/android-game.prev.log");
+            gameLog.getParentFile().mkdirs();
+            if (gameLog.length()>0) { previous.delete(); gameLog.renameTo(previous); }
             final Process launched=launchScript(extra.toArray(new String[0]));
             game=launched;
             Thread log=new Thread(() -> {
                 try (BufferedReader r=new BufferedReader(new InputStreamReader(launched.getInputStream()));
-                     PrintWriter out=new PrintWriter(new File(BASE,"logs/android-game.log"))) {
+                     PrintWriter out=new PrintWriter(gameLog)) {
                     for (String line:modsLog) out.println(line);
                     out.flush();
                     String line; while ((line=r.readLine())!=null) { out.println(line); out.flush(); }
@@ -1059,7 +1084,7 @@ public final class MainActivity extends Activity {
     private void error(String message) {
         hadError=true;
         android.util.Log.e("Bloodborne",message);
-        main.post(() -> { if (!destroyed) { status.setText(message); status.setVisibility(View.VISIBLE); } });
+        main.post(() -> { if (!destroyed) { status.setText(message+"\nMenu \u2192 Report a problem saves the logs."); status.setVisibility(View.VISIBLE); } });
     }
     private void stopGame() {
         Process p=game; game=null;
