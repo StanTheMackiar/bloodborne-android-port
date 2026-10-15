@@ -584,11 +584,38 @@ void EmitContext::DefineInputs() {
 void EmitContext::DefineVertexBlock() {
     const std::array<Id, 8> zero{f32_zero_value, f32_zero_value, f32_zero_value, f32_zero_value,
                                  f32_zero_value, f32_zero_value, f32_zero_value, f32_zero_value};
-    output_position = DefineVariable(F32[4], spv::BuiltIn::Position, spv::StorageClass::Output);
     const bool needs_clip_distance_emulation = sw_stage == SwStage::Vertex &&
                                                hw_stage == HwStage::Vertex &&
                                                profile.needs_clip_distance_emulation;
     const auto has_clip_distance_outputs = info.stores.GetAny(IR::Attribute::ClipDistance);
+    // bbport: a vertex shader of a rect or quad list feeds the auxiliary tessellation control
+    // shader, whose gl_in is the whole gl_PerVertex block (Position, PointSize, ClipDistance[1],
+    // CullDistance[1]). Its output is that same block: the stock Adreno driver (512.676) passes
+    // garbage to the control shader when the vertex shader's Position is a lone variable or a
+    // smaller block (nothing drawn, or garbage colours; Turnip and desktop drivers match by
+    // built-in either way).
+    if (sw_stage == SwStage::Vertex && hw_stage == HwStage::Vertex &&
+        runtime_info.sw.vs.tess_emulated_primitive && !has_clip_distance_outputs &&
+        !info.stores.GetAny(IR::Attribute::CullDistance) &&
+        !info.stores.GetAny(IR::Attribute::PointSize)) {
+        const Id float_arr{TypeArray(F32[1], ConstU32(1U))};
+        const Id block{TypeStruct(F32[4], F32[1], float_arr, float_arr)};
+        Decorate(block, spv::Decoration::Block);
+        MemberDecorate(block, 0U, spv::Decoration::BuiltIn, static_cast<u32>(spv::BuiltIn::Position));
+        MemberDecorate(block, 1U, spv::Decoration::BuiltIn,
+                       static_cast<u32>(spv::BuiltIn::PointSize));
+        MemberDecorate(block, 2U, spv::Decoration::BuiltIn,
+                       static_cast<u32>(spv::BuiltIn::ClipDistance));
+        MemberDecorate(block, 3U, spv::Decoration::BuiltIn,
+                       static_cast<u32>(spv::BuiltIn::CullDistance));
+        output_per_vertex = AddGlobalVariable(TypePointer(spv::StorageClass::Output, block),
+                                              spv::StorageClass::Output);
+        Name(output_per_vertex, "gl_PerVertex_out");
+        interfaces.push_back(output_per_vertex);
+    } else {
+        output_position =
+            DefineVariable(F32[4], spv::BuiltIn::Position, spv::StorageClass::Output);
+    }
     if (has_clip_distance_outputs && !needs_clip_distance_emulation) {
         const Id type{TypeArray(F32[1], ConstU32(8U))};
         const Id initializer{ConstantComposite(type, zero)};

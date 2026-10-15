@@ -9,6 +9,11 @@
 namespace Shader::Backend::SPIRV {
 
 void EmitPrologue(EmitContext& ctx) {
+    if (Sirit::ValidId(ctx.output_per_vertex)) {
+        ctx.output_position =
+            ctx.OpAccessChain(ctx.TypePointer(spv::StorageClass::Output, ctx.F32[4]),
+                              ctx.output_per_vertex, ctx.ConstU32(0U));
+    }
     if (ctx.hw_stage == HwStage::Fragment) {
         ctx.DefineAmdPerVertexAttribs();
     }
