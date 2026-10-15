@@ -1,47 +1,42 @@
 #!/usr/bin/env bash
-# Build a Bloodborne-only Android UI using the installed runtime's native bridge ABI.
+# Build the Bloodborne Android app (Java UI + libbbpresent.so, the frame path of the Bionic game process).
+# With BB_RUNTIME_ARCHIVE (build_release_runtime.py) the runtime archive goes inside the APK as an asset.
 set -euo pipefail
 cd -- "$(dirname -- "$0")/../.."
 sdk=${BB_ANDROID_SDK:-"$PWD/.local-deps/android/sdk"}
 build_tools="$sdk/build-tools/35.0.0"
 android_jar="$sdk/platforms/android-35/android.jar"
-runtime_apk=${BB_FEXDROID_APK:-"$PWD/.local-deps/android/fexdroid-legacy.apk"}
 local_jdk="$PWD/.local-deps/android/jdk/usr/lib/jvm/java-27-openjdk"
 if [[ -x $local_jdk/bin/javac ]]; then
     export JAVA_HOME="$local_jdk" PATH="$local_jdk/bin:$PATH"
 fi
 out="$PWD/out/thor/frontend"
-rm -rf "$out/classes" "$out/dex" "$out/res" "$out/assets"
+rm -rf "$out/classes" "$out/dex" "$out/res" "$out/assets" "$out/lib"
 mkdir -p "$out/classes" "$out/dex" "$out/res/drawable" "$out/assets"
 cp -r tools/android/frontend/res/. "$out/res/"
 if [[ -n ${BB_RUNTIME_ARCHIVE:-} ]]; then
     cp "$BB_RUNTIME_ARCHIVE" "$out/assets/runtime.payload"
     cp "${BB_RUNTIME_ARCHIVE%.tar.gz}.sha256" "$out/assets/runtime.sha256"
-    cp "${BB_RUNTIME_ARCHIVE%.tar.gz}.python-packages.txt" "$out/assets/python-packages.txt"
 fi
 # Use the user's own Bloodborne icon locally; game art is not committed to this repository.
-python3 - "$runtime_apk" "$out" <<'PY'
-import hashlib, sys, zipfile
+python3 - "$out" <<'PY'
+import os, sys
 from pathlib import Path
 from PIL import Image
-apk, out = Path(sys.argv[1]), Path(sys.argv[2])
-assert hashlib.file_digest(apk.open('rb'), 'sha256').hexdigest() == '2074fcee551dab0c6b0719c3f90f6389e517f194aaabacb5b0080bb2977ed847'
+out = Path(sys.argv[1])
 icon = Path('game/CUSA03173/sce_sys/icon0.dds')
-if __import__('os').environ.get('BB_RUNTIME_ARCHIVE') and not icon.exists():
+if os.environ.get('BB_RUNTIME_ARCHIVE') and not icon.exists():
     raise SystemExit('Release build needs the user-owned game icon at game/CUSA03173/sce_sys/icon0.dds')
 if icon.exists():
     (out/'res/drawable/icon.xml').unlink(missing_ok=True)
     Image.open(icon).save(out/'res/drawable/icon.png')
-with zipfile.ZipFile(apk) as z:
-    for name in ('lib/arm64-v8a/libfxdisplay.so', 'lib/arm64-v8a/libfxio.so'):
-        z.extract(name, out)
 PY
 cp tools/android/frontend/THIRD_PARTY_LICENSES.txt "$out/assets/"
-# The Steam sign-in's libraries (SteamDllDialog.java: JavaSteam and its dependencies, ZXing, zstd).
-steam_libs=$PWD/.local-deps/android/steam-libs
-[[ -f $steam_libs/jars.txt ]] || bash tools/android/fetch_steam_libs.sh
-mapfile -t steam_jars < <(sed "s|^|$steam_libs/jars/|" "$steam_libs/jars.txt")
-mkdir -p "$out/lib/arm64-v8a" && cp "$steam_libs"/jni/*.so "$out/lib/arm64-v8a/"
+# The Mods menu's libraries (ModArchive.java: Apache Commons Compress and xz, for .zip and .7z mods).
+mod_libs=$PWD/.local-deps/android/mod-libs
+[[ -f $mod_libs/jars.txt ]] || bash tools/android/fetch_mod_libs.sh
+mapfile -t lib_jars < <(sed "s|^|$mod_libs/jars/|" "$mod_libs/jars.txt")
+mkdir -p "$out/lib/arm64-v8a"
 # libbbpresent.so: the Bionic game's frame path (AHardwareBuffers -> ASurfaceControl), built with the
 # NDK at minSdk 28 (the API 29 calls are looked up at run time). NEEDED: libandroid, liblog,
 # libnativewindow and libc/libm/libdl only.
@@ -53,9 +48,9 @@ ndk=${BB_NDK:-$PWD/.local-deps/android/sdk/ndk/29.0.14206865}
     -Itools/android/present tools/android/frontend/jni/bbpresent/bbpresent.c \
     -landroid -llog -lnativewindow -o "$out/lib/arm64-v8a/libbbpresent.so"
 mapfile -t sources < <(rg --files tools/android/frontend/src -g '*.java')
-javac --release 8 -classpath "$android_jar:$(IFS=:; echo "${steam_jars[*]}")" -d "$out/classes" "${sources[@]}"
+javac --release 8 -classpath "$android_jar:$(IFS=:; echo "${lib_jars[*]}")" -d "$out/classes" "${sources[@]}"
 mapfile -t classes < <(rg --files "$out/classes" -g '*.class')
-"$build_tools/d8" --release --min-api 28 --lib "$android_jar" --output "$out/dex" "${classes[@]}" "${steam_jars[@]}"
+"$build_tools/d8" --release --min-api 28 --lib "$android_jar" --output "$out/dex" "${classes[@]}" "${lib_jars[@]}"
 "$build_tools/aapt" package -f -M tools/android/frontend/AndroidManifest.xml \
     -S "$out/res" -A "$out/assets" -I "$android_jar" -0 payload -F "$out/unsigned.apk"
 python3 - "$out" <<'PY'

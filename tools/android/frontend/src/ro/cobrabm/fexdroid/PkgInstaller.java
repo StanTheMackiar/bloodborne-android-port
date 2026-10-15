@@ -178,7 +178,7 @@ final class PkgInstaller {
         Deque<String> tail = new ArrayDeque<>();
         boolean checked = false;
         ProcessBuilder builder = new ProcessBuilder(tool.getPath(), pkg.getPath(), staging.getPath()).redirectErrorStream(true);
-        // A Bionic program: none of the glibc runtime's library paths.
+        // A Bionic program: no inherited library paths.
         builder.environment().remove("LD_LIBRARY_PATH");
         builder.environment().remove("LD_PRELOAD");
         final Process process;

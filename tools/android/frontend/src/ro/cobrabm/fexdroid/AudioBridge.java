@@ -10,7 +10,7 @@ import java.io.FileDescriptor;
 import java.io.FileInputStream;
 import java.io.RandomAccessFile;
 
-/** Game audio: SDL's disk driver writes the mixed output (s16 stereo 48 kHz, run-thor.sh) into a
+/** Game audio: the game's mixer writes its output (s16 stereo 48 kHz, BB_AUDIO_FIFO, run-bionic.sh) into a
  *  FIFO; this plays it. The FIFO is held open read-write, so the game's open never blocks and a
  *  restarted game writes into the same pipe. The playback rate paces the game's audio thread. */
 final class AudioBridge {

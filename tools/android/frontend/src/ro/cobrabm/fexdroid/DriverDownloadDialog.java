@@ -19,9 +19,8 @@ import java.io.FileInputStream;
 import java.util.List;
 import java.util.concurrent.CancellationException;
 
-/** Downloads a GPU driver from this app's GitHub releases (DriverCatalog; the Linux or the Android builds,
- *  as the runtime is): the 5 newest builds, the one
- *  for this GPU marked. It opens with the last list it saved, looks for a newer one in the background
+/** Downloads a GPU driver from this app's GitHub releases (DriverCatalog; the Turnip for Android
+ *  builds): the 5 newest builds, the one for this GPU marked. It opens with the last list it saved, looks for a newer one in the background
  *  and updates the list in place. A tap downloads the zip with a progress bar, installs it through
  *  DriverManager (which checks it) and offers to use it. Rows take the gamepad (D-pad, A, B) and touch. */
 final class DriverDownloadDialog {
@@ -56,7 +55,7 @@ final class DriverDownloadDialog {
     /** files: the app's files directory. */
     DriverDownloadDialog(Activity activity,DriverManager drivers,File files,Host host) {
         this.activity=activity; this.drivers=drivers; this.host=host;
-        catalog=new DriverCatalog(files,drivers.bionic); zip=new File(new File(files,"drivers"),".download.zip");
+        catalog=new DriverCatalog(files); zip=new File(new File(files,"drivers"),".download.zip");
     }
 
     private int dp(float n) { return Math.round(n*activity.getResources().getDisplayMetrics().density); }
@@ -66,10 +65,8 @@ final class DriverDownloadDialog {
         LinearLayout box=new LinearLayout(activity); box.setOrientation(LinearLayout.VERTICAL);
         box.setPadding(dp(24),dp(8),dp(24),dp(8));
         TextView intro=new TextView(activity); intro.setTextSize(13); intro.setAlpha(0.8f);
-        intro.setText(drivers.bionic ? "Turnip for Android builds from this app's GitHub releases. A driver you pick "
-            +"here replaces the phone's stock driver; choose System driver again to go back."
-            : "Turnip builds from this app's GitHub releases. A driver you pick here replaces the "
-            +"built-in one, which is chosen by GPU; choose Built-in Turnip again to go back.");
+        intro.setText("Turnip for Android builds from this app's GitHub releases. A driver you pick "
+            +"here replaces the phone's stock driver; choose System driver again to go back.");
         box.addView(intro);
         note=new TextView(activity); note.setTextSize(13); note.setTextColor(0xffc6ad76);
         note.setPadding(0,dp(8),0,dp(4));

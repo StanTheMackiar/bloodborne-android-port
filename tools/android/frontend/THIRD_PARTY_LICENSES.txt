@@ -1,41 +1,18 @@
-Native display and X11 input bridges: fexdroid
-https://github.com/cobrabm12/fexdroid
-Source revision 2b03ec73c3507b640fba1942fb8d99b43b88945a
-Reused unmodified from the verified fexdroid legacy APK.
+fexdroid: https://github.com/cobrabm12/fexdroid (MIT License, below). The app's
+Java package name comes from it; the display and input bridge libraries of earlier
+releases (libfxdisplay, libfxio) are no longer included.
 
-Turnip Vulkan driver: Mesa (MIT), https://gitlab.freedesktop.org/mesa/mesa
-commit 35b085c4c067f198ce0b6437d94678e47b9c645f, with fexdroid's Mesa patches
-0001, 0005, 0006 and 0007 (patches/mesa at fexdroid revision
-dbf9808b07570faf5aa912af16d4c4a1b5d0130f), under the fexdroid license below.
-Adreno 8xx variant: Mesa from https://github.com/whitebelyash/mesa-unified
-(turnip/gen8, commit 9c7e022677dfa3abb356c2b6732cbd2e25783d01, MIT), with
-upstream Mesa commits b889ab52, b7ad24ad, e984ef29, 6cb65e61 and the same
-fexdroid patches.
+GPU drivers: the app contains none. Turnip for Android builds the player installs
+or downloads from this project's GitHub releases are Mesa (MIT,
+https://gitlab.freedesktop.org/mesa/mesa; the Adreno 8xx variant from
+https://github.com/whitebelyash/mesa-unified, turnip/gen8, MIT), with this
+project's patches (tools/android/mesa-patches in the source).
 
-lsfg-vk 1.0.0 (bbport/arm64/lsfg): Lossless Scaling frame generation on Linux,
-https://github.com/PancakeTAS/lsfg-vk (tag v1.0.0), MIT License, Copyright (c)
-2025 lsfg-vk (bbport/arm64/lsfg/LICENSE.md). Built for ARM64 with this port's
-changes for the Turnip driver (bbport/arm64/lsfg/0001-turnip-kgsl-sync-fd.patch).
-It includes dxbc from DXVK (zlib/libpng license; Copyright (c) 2017 Philip
-Rebohle, 2019 Joshua Ashton, 2019 Robin Kertels, 2023 Jeffrey Ellison),
-pe-parse (MIT, Copyright (c) 2013 Andrew Ruef), toml11 (MIT, Copyright (c) 2017
-Toru Niina) and volk (MIT, Copyright (c) 2018-2025 Arseny Kapoulkine).
-Lossless Scaling and its Lossless.dll are not included: the app downloads the
-player's own copy from Steam, or the player copies it.
-
-Steam sign-in (downloads Lossless.dll from the player's own Lossless Scaling):
-JavaSteam 1.8.0 (MIT, https://github.com/Longi94/JavaSteam), with Kotlin and
-kotlinx.coroutines/io/serialization (Apache-2.0, JetBrains), Ktor (Apache-2.0,
-JetBrains), OkHttp and Okio (Apache-2.0, Square), Protocol Buffers for Java
-(BSD-3-Clause, Google), Apache Commons Lang 3 (Apache-2.0), SLF4J API (MIT),
-JetBrains annotations (Apache-2.0), XZ for Java (0BSD, Lasse Collin) and
-zstd-jni (BSD-2-Clause, Luben Karavelov; bundles Zstandard, BSD). The QR code
-is drawn with ZXing core 3.5.4 (Apache-2.0). Menu icons: Material Design icons
-(Apache-2.0, Google).
+Menu icons: Material Design icons (Apache-2.0, Google).
 
 Mods (unpacking .zip and .7z mod archives): Apache Commons Compress 1.26.1, Apache
-Commons IO 2.15.1 and Apache Commons Codec 1.16.1 (all Apache-2.0), with the XZ for
-Java and Apache Commons Lang 3 libraries above. Their notices:
+Commons IO 2.15.1, Apache Commons Codec 1.16.1 and Apache Commons Lang 3 3.20.0 (all
+Apache-2.0), with XZ for Java 1.12 (0BSD, Lasse Collin). Their notices:
 
 Apache Commons Compress
 Copyright 2002-2024 The Apache Software Foundation

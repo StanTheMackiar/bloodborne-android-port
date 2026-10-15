@@ -1,8 +1,8 @@
-ps4-pkg-tool (bbport/arm64/bin/ps4-pkg-tool)
-=============================================
+ps4-pkg-tool (bbport/bionic/bin/ps4-pkg-tool)
+==============================================
 
 The app unpacks PS4 fake PKGs (mods, game and update packages) with ps4-pkg-tool, a command line
-program run in the app's Linux rootfs. It is a separate executable, not linked into the app.
+program run from the app's runtime (an Android build). It is a separate executable, not linked into the app.
 
 Source:   https://github.com/xXJSONDeruloXx/ps4-pkg-tools (commit 45baedaa29b8da42b3c6fe912800d2fa4119834b)
 License:  GNU General Public License, version 2 or (at your option) any later version

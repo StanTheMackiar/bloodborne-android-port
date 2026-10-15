@@ -19,8 +19,8 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
-/** The Turnip driver builds published as GitHub releases of this app (tag turnip-*, or turnip-android-* for
- *  the Bionic runtime's Android builds; each runtime lists only its own), and their download.
+/** The Turnip for Android driver builds published as GitHub releases of this app (tag turnip-android-*), and
+ *  their download. Linux (glibc) Turnip releases (other turnip-* tags) are not listed: the game runs as an Android process.
  *  A release can hold several builds: each Turnip-<variant>-<version>-<sha>.zip asset is its own entry
  *  (patches-*.tar.gz and other assets are ignored). The app's own releases (android-*) are in the same
  *  list, so the releases are listed and filtered by tag; /latest would only find the app. The 5 newest
@@ -71,17 +71,10 @@ final class DriverCatalog {
     }
 
     private final File cache;
-    private final boolean bionic;
-    /** files: the app's files directory; bionic: the Android builds (tag turnip-android-*), else the Linux ones. */
-    DriverCatalog(File files,boolean bionic) {
-        this.bionic=bionic;
-        cache=new File(new File(files,"drivers"),bionic ? ".catalog-android.json" : ".catalog.json");
-    }
-    /** Whether a release tag belongs to the runtime's list: turnip-android-* for Bionic, the other turnip-* for glibc. */
-    static boolean tagMatches(String tag,boolean bionic) {
-        boolean android=tag.startsWith("turnip-android-");
-        return bionic ? android : tag.startsWith("turnip-") && !android;
-    }
+    /** files: the app's files directory. */
+    DriverCatalog(File files) { cache=new File(new File(files,"drivers"),".catalog-android.json"); }
+    /** Whether a release tag is one of the Android Turnip builds: turnip-android-*. */
+    static boolean tagMatches(String tag) { return tag.startsWith("turnip-android-"); }
 
     /** The GPU family of a variant: "gen8v37" and "gen8" are both "gen8" (Adreno 8xx). Null stays null. */
     static String family(String variant) {
@@ -119,16 +112,16 @@ final class DriverCatalog {
     }
     static String megabytes(long bytes) { return String.format(Locale.ROOT,"%.1f MB",bytes/1048576.0); }
 
-    /** The driver builds in a GitHub releases answer: every Turnip-*.zip asset of every turnip-* release is
+    /** The driver builds in a GitHub releases answer: every Turnip-*.zip asset of every turnip-android-* release is
      *  an entry. Drafts skipped; newest asset first, at most 5. */
-    static List<Entry> parse(String json,boolean bionic) throws JSONException {
+    static List<Entry> parse(String json) throws JSONException {
         JSONArray releases=new JSONArray(json);
         List<Entry> out=new ArrayList<>();
         for (int i=0;i<releases.length();++i) {
             JSONObject release=releases.optJSONObject(i);
             if (release==null || release.optBoolean("draft")) continue;
             String tag=text(release,"tag_name");
-            if (!tagMatches(tag,bionic)) continue;
+            if (!tagMatches(tag)) continue;
             String published=text(release,"published_at");
             JSONArray assets=release.optJSONArray("assets");
             for (int j=0; assets!=null && j<assets.length(); ++j) {
@@ -183,7 +176,7 @@ final class DriverCatalog {
                     for (int n; (n=in.read(buffer))>0;) { body.write(buffer,0,n); if (body.size()>16<<20) throw new IOException("GitHub's answer is too large"); }
                 }
                 String etag=c.getHeaderField("ETag");
-                result=new Result(parse(body.toString("UTF-8"),bionic),System.currentTimeMillis(),etag==null ? "" : etag);
+                result=new Result(parse(body.toString("UTF-8")),System.currentTimeMillis(),etag==null ? "" : etag);
             } else if (code==403 || code==429) {
                 throw new IOException("GitHub is limiting requests right now");
             } else throw new IOException("GitHub answered "+code);

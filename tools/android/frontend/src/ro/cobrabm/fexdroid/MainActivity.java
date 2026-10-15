@@ -34,25 +34,11 @@ import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /** Bloodborne-only Android player. Keeps the game surface alive beneath its sliding drawer. */
 public final class MainActivity extends Activity {
-    // ---- Runtime: bbport.ini runtime=bionic (default: the Android build, run-bionic.sh) or glibc (run-thor.sh, X server, Turnip) ----
-    private static volatile File iniFile;
-    /** Whether the game runs as the Bionic (Android NDK) process; read from bbport.ini each time. */
-    static boolean bionicRuntime() {
-        File ini=iniFile; String value=null;
-        if (ini!=null) try (BufferedReader r=new BufferedReader(new java.io.FileReader(ini))) {
-            for (String line; (line=r.readLine())!=null;) if (line.startsWith("runtime=")) value=line.substring(8).trim();
-        } catch (Exception ignored) {}
-        return !"glibc".equals(value);
-    }
-
-    /** The app's files (by package: com.ducvd89.bloodborne), its Linux rootfs and the bbport runtime.
-     *  The rootfs programs name its absolute path (their interpreter), set when it was installed. */
-    private String FILES, ROOT, BASE;
+    /** The app's files (by package: com.ducvd89.bloodborne) and the bbport runtime inside them. */
+    private String FILES, BASE;
     /** The game (e.g. CUSA03173, with eboot.bin) in shared storage, chosen by the player. */
     private String gameDir;
     private static final int REQUEST_FOLDER=1, REQUEST_STORAGE=2, REQUEST_DRIVER=3, REQUEST_SAVES=9; // 4-6: ModsDialog, 7-8: GameInstaller
@@ -66,23 +52,22 @@ public final class MainActivity extends Activity {
     private LinearLayout drawerItems;
     private TextView status;
     private View resume;
-    private LinearLayout gameSettingsItem, cheatsItem, modsItem, graphicsItem, losslessItem, steamItem, driverItem, controllerItem, folderItem;
+    private LinearLayout gameSettingsItem, cheatsItem, modsItem, graphicsItem, driverItem, controllerItem, folderItem;
     private TouchControllerOverlay controllerOverlay;
     private PadBridge pad;
     private AudioBridge audio;
-    private volatile Process xvfb, game;
-    private volatile int shmid=-1;
+    private volatile Process game;
+    /** The display (BbPresent's listener) is running and the game may start. */
+    private volatile boolean displayReady;
     private volatile boolean destroyed;
-    /** Vulkan drivers installed from zips (the GPU driver menu); whether the running game uses one. */
+    /** Vulkan drivers installed from zips (the GPU driver menu). */
     private DriverManager drivers;
-    private volatile boolean customDriver;
     private DriverDownloadDialog driverDownload;
     private ModsDialog mods;
     private GameInstaller installer;
     private AppUpdater updater;
     private LinearLayout updateItem;
-    private volatile long gameStartedAt;
-    private boolean drawerOpen, displayOnly, startingX, hadError, swipeConsumed;
+    private boolean drawerOpen, startingDisplay, hadError, swipeConsumed;
     private float touchX, touchY;
     private boolean edgeGesture, imeOpen, imePolling;
     private final AtomicBoolean imeAnswered=new AtomicBoolean();
@@ -90,14 +75,13 @@ public final class MainActivity extends Activity {
     @Override public void onCreate(Bundle saved) {
         super.onCreate(saved);
         FILES="/data/data/"+getPackageName()+"/files";
-        ROOT=FILES+"/rootfs"; BASE=FILES+"/bbport";
-        iniFile=new File(BASE,"bbport.ini");
-        drivers=new DriverManager(new File(FILES)); drivers.bionic=bionicRuntime();
+        BASE=FILES+"/bbport";
+        drivers=new DriverManager(new File(FILES));
         GameInstaller.Host host=modsHost();
         mods=new ModsDialog(this,host); installer=new GameInstaller(this,host);
         updater=new AppUpdater(this,new AppUpdater.Host() {
             @Override public void stopGame() { MainActivity.this.stopGame(); }
-            @Override public void restartGame() { if (!destroyed && shmid>=0) MainActivity.this.restartGame(); }
+            @Override public void restartGame() { if (!destroyed && displayReady) MainActivity.this.restartGame(); }
             @Override public void detail(String text) { setDetail(updateItem,text); }
             @Override public void closed() { if (!destroyed) immersive(); }
             @Override public boolean destroyed() { return destroyed; }
@@ -110,7 +94,6 @@ public final class MainActivity extends Activity {
             attrs.layoutInDisplayCutoutMode=WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
             getWindow().setAttributes(attrs);
         }
-        displayOnly="x".equals(getIntent().getStringExtra("action"));
         pad=new PadBridge(new File(BASE,"android-pad.state"));
         audio=new AudioBridge(new File(BASE,"audio.fifo")); audio.start();
         buildScreen();
@@ -144,14 +127,15 @@ public final class MainActivity extends Activity {
         screen.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob) -> fitSurface(r-l,b-t));
         surface.getHolder().addCallback(new SurfaceHolder.Callback() {
             @Override public void surfaceCreated(SurfaceHolder h) {
-                if (shmid>=0) attach(h);
+                if (displayReady) attach(h);
                 // Returning from the installer's pickers recreates the surface: the installer owns the flow then
                 // (installEnded asks for the folder when it ends without a game).
                 else if (!hasGame()) { pendingHolder=h; if (!installer.active()) askGameFolder(false); }
-                else if (!startingX) { startingX=true; worker.execute(() -> startX(h)); }
+                else if (!startingDisplay) { startingDisplay=true; worker.execute(() -> startDisplay(h)); }
             }
             @Override public void surfaceChanged(SurfaceHolder h,int format,int w,int height) {}
-            @Override public void surfaceDestroyed(SurfaceHolder h) { DisplayBridge.stop(); }
+            // BbPresent drops the game's frames while there is no surface.
+            @Override public void surfaceDestroyed(SurfaceHolder h) {}
         });
         // Touches on the game display send no mouse input (the game is played with a controller).
         surface.setOnTouchListener((v,e) -> true);
@@ -216,15 +200,6 @@ public final class MainActivity extends Activity {
         graphicsItem=menuItem("ic_tune","Graphics settings","",() -> {
             closeDrawer();
             new SettingsDialog(this,new File(BASE,"bbport.ini"),this::restartGame).show();
-        });
-        losslessItem=menuItem("ic_frames","Lossless Scaling","",() -> {
-            closeDrawer();
-            new SettingsDialog(this,new File(BASE,"bbport.ini"),this::restartGame)
-                .showLossless(() -> { Process p=game; return p!=null && p.isAlive(); });
-        });
-        steamItem=menuItem("ic_download","Get Lossless.dll from Steam","",() -> {
-            closeDrawer();
-            new SteamDllDialog(this,new File(BASE,"Lossless.dll")).show();
         });
         driverItem=menuItem("ic_memory","GPU driver","",() -> { closeDrawer(); showDrivers(); });
 
@@ -313,15 +288,6 @@ public final class MainActivity extends Activity {
         TextView detail=row==null ? null : (TextView)row.findViewWithTag("detail");
         if (detail!=null) detail.setText(value);
     }
-    /** Where run-thor.sh looks for Lossless.dll: next to the game folder, else the app's own copy. */
-    private File losslessDll() {
-        if (gameDir!=null) {
-            File beside=new File(new File(gameDir).getParentFile(),"Lossless.dll");
-            if (beside.isFile()) return beside;
-        }
-        File own=new File(BASE,"Lossless.dll");
-        return own.isFile() ? own : null;
-    }
     /** The rows' second lines: the current settings, read when the drawer opens. */
     private void refreshDrawer() {
         java.util.List<String> game=new java.util.ArrayList<>();
@@ -339,24 +305,15 @@ public final class MainActivity extends Activity {
         String limit=setting("fps_limit");
         setDetail(graphicsItem,upscaler+" · "+("0".equals(limit) ? "no FPS limit"
             : (limit==null || !limit.matches("40|45|60") ? "30" : limit)+" FPS limit"));
-        String lsfg=setting("lsfg_multiplier"); boolean dll=losslessDll()!=null;
-        boolean on="2".equals(lsfg) || "3".equals(lsfg) || "4".equals(lsfg);
-        setDetail(losslessItem,!dll ? "Needs Lossless.dll" : on
-            ? lsfg+"× frames · flow "+(setting("lsfg_flow_scale")==null ? "1.0" : setting("lsfg_flow_scale")) : "Off");
-        File found=losslessDll();
-        setDetail(steamItem,found==null ? "Sign in with your Steam account"
-            : found.getParent().equals(BASE) ? "Downloaded from Steam" : "Using Lossless.dll next to the game folder");
-        drivers.bionic=bionicRuntime();
         DriverManager.Driver driver=drivers.find(setting("gpu_driver"));
-        setDetail(driverItem,driver==null ? drivers.bionic ? "System driver (stock)" : "Built-in Turnip"
-            : driver.title()+(drivers.bionic ? "" : " · automatic choice off"));
+        setDetail(driverItem,driver==null ? "System driver (stock)" : driver.title());
         setDetail(controllerItem,controllerEnabled() ? "On" : "Off");
         setDetail(folderItem,gameDir==null ? "Not chosen" : gameDir);
     }
 
     private void openDrawer() {
         if (drawerOpen) return;
-        drawerOpen=true; controllerOverlay.release(); pad.reset(); XInput.button(1,false);
+        drawerOpen=true; controllerOverlay.release(); pad.reset();
         refreshDrawer();
         controllerOverlay.setVisibility(View.GONE);
         handle.setVisibility(View.GONE);
@@ -437,9 +394,6 @@ public final class MainActivity extends Activity {
             return super.dispatchKeyEvent(e);
         }
         if (pad.key(e)) return true;
-        if (shmid>=0 && e.getScanCode()>0 && e.getScanCode()+8<=255) {
-            XInput.key(e.getScanCode()+8,e.getAction()==KeyEvent.ACTION_DOWN); return true;
-        }
         return super.dispatchKeyEvent(e);
     }
     @Override public boolean dispatchGenericMotionEvent(MotionEvent e) {
@@ -467,96 +421,48 @@ public final class MainActivity extends Activity {
         if ("close-menu".equals(action)) closeDrawer();
     }
 
-    private Process process(String... args) throws java.io.IOException { return process(new String[0],args); }
-    /** extra: NAME=value pairs added to the environment. */
-    private Process process(String[] extra,String... args) throws java.io.IOException {
-        ProcessBuilder b=new ProcessBuilder(args).redirectErrorStream(true);
+    /** The game's launch script, run with Android's own shell. extra: NAME=value pairs added to the environment.
+     *  The environment is cleared: the script sets what the game process needs (run-bionic.sh). */
+    private Process launchScript(String[] extra) throws java.io.IOException {
+        ProcessBuilder b=new ProcessBuilder("/system/bin/sh",BASE+"/run-bionic.sh","game").redirectErrorStream(true);
         Map<String,String> env=b.environment(); env.clear();
-        env.put("PATH",ROOT+"/usr/bin:"+ROOT+"/bin:/system/bin");
+        env.put("PATH","/system/bin");
         env.put("HOME",FILES+"/home/bbport"); env.put("LANG","C.UTF-8");
-        env.put("TMPDIR",ROOT+"/tmp"); env.put("XDG_RUNTIME_DIR",ROOT+"/tmp");
-        env.put("FXD_FILES",FILES); env.put("FXD_ROOT",ROOT); env.put("BB_ANDROID_INPUT","1");
-        // The rootfs's loader was built for the original fexdroid path: its libraries by name here.
-        env.put("LD_LIBRARY_PATH",ROOT+"/usr/lib/aarch64-linux-gnu:"+ROOT+"/usr/lib");
-        // Its libc emulates SysV shared memory through fxshmd (started below), whose built-in path
-        // is also fexdroid's: the socket by name.
-        env.put("FXD_SHM_SOCKET",ROOT+"/tmp/.fxshm/sock");
+        env.put("TMPDIR",FILES+"/tmp");
+        env.put("FXD_FILES",FILES); env.put("BB_ANDROID_INPUT","1");
         if (gameDir!=null) env.put("BB_GAME_DIR",gameDir);
-        if (args[0].endsWith("/Xvfb")) env.put("LD_PRELOAD",ROOT+"/usr/lib/fexdroid/libfxpath.so");
-        env.put("LIBGL_DRIVERS_PATH",ROOT+"/usr/lib/aarch64-linux-gnu/dri");
         for (String pair:extra) { int eq=pair.indexOf('='); env.put(pair.substring(0,eq),pair.substring(eq+1)); }
         return b.start();
     }
     /** The runtime's PKG tool (bionic/bin/ps4-pkg-tool) is needed before any game has started: the runtime is
-     *  otherwise unpacked only by startX. Blocks (off the UI thread). */
+     *  otherwise unpacked only by startDisplay. Blocks (off the UI thread). */
     private void ensureRuntime() throws java.io.IOException {
         try { RuntimeInstaller.ensure(this,new File(FILES),message -> {}); }
         catch (java.io.IOException e) { throw e; }
         catch (Exception e) { throw new java.io.IOException("The app's runtime could not be installed: "+e.getMessage(),e); }
     }
-    private void startX(SurfaceHolder holder) {
+    private void startDisplay(SurfaceHolder holder) {
         try {
             RuntimeInstaller.ensure(this, new File(FILES), message -> main.post(() -> status.setText(message)));
             // The runtime brought bbport.default.ini: settings defaults apply before the game reads bbport.ini.
             try { SettingsDefaults.apply(new File(BASE)); main.post(() -> { if (drawerOpen) refreshDrawer(); }); }
             catch (Exception ex) { android.util.Log.e("Bloodborne","default settings: "+ex); }
-            boolean bionic=bionicRuntime();
-            if (!new File(ROOT,"usr/bin/Xvfb").canExecute() || !new File(BASE,"run-thor.sh").isFile()
-                    || bionic && (!new File(BASE,"bionic/bin/bb-probe").canExecute() || !new File(BASE,"run-bionic.sh").isFile()))
+            if (!new File(BASE,"bionic/bin/bb-probe").canExecute() || !new File(BASE,"run-bionic.sh").isFile())
                 throw new java.io.IOException("The Bloodborne runtime is missing. Install the runtime bundle.");
             new File(FILES,"home/bbport").mkdirs();
-            try (PrintWriter passwd=new PrintWriter(new File(ROOT,"etc/passwd"));
-                 PrintWriter group=new PrintWriter(new File(ROOT,"etc/group"))) {
-                int uid=android.os.Process.myUid();
-                passwd.println("root:x:0:0:root:/root:/bin/sh");
-                passwd.println("user:x:"+uid+":"+uid+":Bloodborne:"+FILES+"/home/bbport:"+ROOT+"/bin/sh");
-                group.println("root:x:0:"); group.println("user:x:"+uid+":");
-            }
-            if (bionic) {
-                // No X server: the game presents through the app (BB_PRESENT_SOCKET). shmid>=0 marks the display ready.
-                shmid=0;
-                main.post(() -> attach(holder));
-            } else startXServer(holder);
+            new File(FILES,"tmp").mkdirs();
+            // No display server: the game presents through the app (BB_PRESENT_SOCKET, BbPresent).
+            displayReady=true;
+            main.post(() -> attach(holder));
         } catch (Exception ex) { error(ex.toString()); }
-    }
-    /** The glibc runtime's display: the shared memory daemon and Xvfb, whose frame the display bridge shows. */
-    private void startXServer(SurfaceHolder holder) throws Exception {
-        {
-            new File(ROOT,"tmp/.X0-lock").delete(); new File(ROOT,"tmp/.X11-unix/X0").delete();
-            // The shared memory daemon (Xvfb's frame, the display bridge): forks itself and stays.
-            Process shmd=process(ROOT+"/usr/libexec/fxshmd","--dir",ROOT+"/tmp/.fxshm");
-            shmd.waitFor();
-            xvfb=process(ROOT+"/usr/bin/Xvfb",":0","-screen","0","1280x720x24",
-                "-shmem","-ac","-nolisten","tcp","-pn");
-            Pattern ready=Pattern.compile("screen 0 shmid (\\d+)");
-            BufferedReader r=new BufferedReader(new InputStreamReader(xvfb.getInputStream()));
-            {
-                String line;
-                while ((line=r.readLine())!=null && !destroyed) {
-                    android.util.Log.i("Bloodborne-X11",line);
-                    Matcher m=ready.matcher(line);
-                    if (m.find()) {
-                        shmid=Integer.parseInt(m.group(1));
-                        main.post(() -> attach(holder));
-                        break;
-                    }
-                }
-                if (shmid<0) throw new java.io.IOException("The game display could not start.");
-                Thread drain=new Thread(() -> { try (BufferedReader reader=r) { while (reader.readLine()!=null) {} }
-                    catch (Exception ignored) {} },"X11-log");
-                drain.setDaemon(true); drain.start();
-            }
-        }
     }
     private void attach(SurfaceHolder holder) {
         if (destroyed || !holder.getSurface().isValid()) return;
-        // Bionic runtime: frames arrive as AHardwareBuffers on a socket (BbPresent); no X server, no shmid.
-        String result=bionicRuntime() ? BbPresent.start(holder,getFilesDir()+"/bbpresent.sock")
-            : DisplayBridge.start(holder.getSurface(),ROOT+"/tmp/.fxshm/sock",shmid,60,ROOT+"/tmp/fxpresent.sock");
+        // Frames arrive as AHardwareBuffers on a socket (BbPresent).
+        String result=BbPresent.start(holder,getFilesDir()+"/bbpresent.sock");
         android.util.Log.i("Bloodborne",result);
         if (!result.startsWith("bridge running:")) { error(result); return; }
-        XInput.connect(0);
-        if (!displayOnly && game==null) worker.execute(() -> startGame());
+        if (game==null) worker.execute(() -> startGame());
         pollFrames();
         if (!imePolling) { imePolling=true; pollIme(); }
     }
@@ -710,7 +616,7 @@ public final class MainActivity extends Activity {
                 if (destroyed) return;
                 new AlertDialog.Builder(this).setTitle(success ? "Done" : failure).setMessage(text)
                     .setPositiveButton("OK",null).setOnDismissListener(d -> immersive()).show();
-                if (wasRunning && shmid>=0) restartGame();
+                if (wasRunning && displayReady) restartGame();
             });
         });
     }
@@ -719,7 +625,7 @@ public final class MainActivity extends Activity {
         gameDir=dir.getPath();
         getSharedPreferences("bloodborne",MODE_PRIVATE).edit().putString("game_dir",gameDir).apply();
         status.setText("Starting Bloodborne…"); status.setVisibility(View.VISIBLE);
-        if (shmid>=0) restartGame(); else startPending(); // the display runs already when the game was stopped for the install
+        if (displayReady) restartGame(); else startPending(); // the display runs already when the game was stopped for the install
     }
     /** A storage folder of the picker (tree document "primary:Path" or "XXXX-XXXX:Path") as a path. */
     static File folderOf(android.net.Uri tree) {
@@ -772,7 +678,7 @@ public final class MainActivity extends Activity {
             @Override public void installEnded(boolean stopped) {
                 if (destroyed) return;
                 if (!hasGame()) askGameFolder(false);
-                else if (stopped && shmid>=0) restartGame(); // the install stopped the game and did not finish
+                else if (stopped && displayReady) restartGame(); // the install stopped the game and did not finish
             }
             @Override public void toast(String message) { MainActivity.this.toast(message); }
             @Override public void restart() { restartGame(); }
@@ -809,22 +715,18 @@ public final class MainActivity extends Activity {
     private void startPending() {
         SurfaceHolder h=pendingHolder!=null ? pendingHolder : surface.getHolder();
         pendingHolder=null;
-        if (h.getSurface()!=null && h.getSurface().isValid() && !startingX && shmid<0) {
-            startingX=true; worker.execute(() -> startX(h));
+        if (h.getSurface()!=null && h.getSurface().isValid() && !startingDisplay && !displayReady) {
+            startingDisplay=true; worker.execute(() -> startDisplay(h));
         }
     }
 
     private void pollFrames() {
         if (destroyed) return;
-        Process running=game;
-        // A driver from a zip without this app's Mesa patches presents through X11, which the bridge
-        // shows without counting it: the start text goes once that game has run for a while.
-        if (!hadError && (DisplayBridge.directFrames()+BbPresent.framesIfLoaded()>0 || customDriver && running!=null && running.isAlive()
-                && android.os.SystemClock.uptimeMillis()-gameStartedAt>20000)) status.setVisibility(View.GONE);
+        if (!hadError && BbPresent.framesIfLoaded()>0) status.setVisibility(View.GONE);
         main.postDelayed(this::pollFrames,1000);
     }
 
-    /** The game's text dialog (the character name, BB_IME_FILE in run-thor.sh): shown here with the
+    /** The game's text dialog (the character name, BB_IME_FILE in run-bionic.sh): shown here with the
      *  touch keyboard. The request holds the maximum length, the title and the current text. */
     private void pollIme() {
         if (destroyed) return;
@@ -867,13 +769,12 @@ public final class MainActivity extends Activity {
         } catch (Exception ex) { android.util.Log.e("Bloodborne","text answer: "+ex); return; }
         if (!temporary.renameTo(result)) android.util.Log.e("Bloodborne","text answer: rename failed");
     }
-    // ---- GPU driver: the bundled Turnip or one installed from a zip (DriverManager, run-thor.sh) ----
+    // ---- GPU driver: the phone's own or one installed from a zip (DriverManager, run-bionic.sh) ----
     private void showDrivers() {
-        drivers.bionic=bionicRuntime();
         java.util.List<DriverManager.Driver> list=drivers.list();
         DriverManager.Driver current=drivers.find(setting("gpu_driver"));
         String[] names=new String[list.size()+1];
-        names[0]=drivers.bionic ? "System driver (stock)" : "Built-in Turnip (automatic by GPU)";
+        names[0]="System driver (stock)";
         int checked=0;
         for (int i=0;i<list.size();++i) {
             names[i+1]=list.get(i).title();
@@ -895,7 +796,6 @@ public final class MainActivity extends Activity {
     }
     /** A driver comes from the app's GitHub releases or from a zip on the device. */
     private void askAddDriver() {
-        drivers.bionic=bionicRuntime();
         new AlertDialog.Builder(this).setTitle("Add a GPU driver")
             .setItems(new String[]{"Download from GitHub","Install a zip from this device"},(d,which) -> {
                 if (which==0) showDriverDownloads(); else askDriverZip();
@@ -912,16 +812,13 @@ public final class MainActivity extends Activity {
         });
         driverDownload.show();
     }
-    /** The GPU family, as run-thor.sh chooses its bundled Turnip from kgsl-chip-id's output
-     *  (0x44... is Adreno 8xx): "gen8", "main", or null when the GPU cannot be read. Blocks. */
+    /** The GPU family, from kgsl-chip-id's output (0x44... is Adreno 8xx): "gen8", "main", or null when the
+     *  GPU cannot be read. The download list marks the Turnip build for it. Blocks. */
     private String gpuVariant() {
         try {
-            Process p;
-            if (bionicRuntime()) { // a Bionic program: none of the glibc runtime's library paths
-                ProcessBuilder b=new ProcessBuilder(BASE+"/bionic/bin/kgsl-chip-id").redirectErrorStream(true);
-                b.environment().remove("LD_LIBRARY_PATH"); b.environment().remove("LD_PRELOAD");
-                p=b.start();
-            } else p=process(BASE+"/arm64/bin/kgsl-chip-id");
+            ProcessBuilder b=new ProcessBuilder(BASE+"/bionic/bin/kgsl-chip-id").redirectErrorStream(true);
+            b.environment().remove("LD_LIBRARY_PATH"); b.environment().remove("LD_PRELOAD");
+            Process p=b.start();
             try {
                 if (!p.waitFor(5,java.util.concurrent.TimeUnit.SECONDS)) return null;
                 String line=new BufferedReader(new InputStreamReader(p.getInputStream())).readLine();
@@ -935,17 +832,10 @@ public final class MainActivity extends Activity {
     }
     private void askDriverZip() {
         new AlertDialog.Builder(this).setTitle("Install a GPU driver")
-            .setMessage(drivers.bionic
-                ? "Choose a zip with a Turnip (or other Vulkan driver) built for Android, as the adrenotools "
+            .setMessage("Choose a zip with a Turnip (or other Vulkan driver) built for Android, as the adrenotools "
                 +"driver packs are: a meta.json with the library's name, and the .so. Linux (glibc) builds do not "
-                +"load in this runtime.\n\nA driver you install replaces the phone's stock driver. "
-                +"If the game stops, choose System driver again."
-                : "Choose a zip with a Linux (glibc) build of Turnip, such as the Turnip builds for "
-                +"Winlator or Mobox. Turnip for Android (adrenotools zips) cannot load in this runtime; "
-                +"switch the runtime to Bionic in the graphics settings for those.\n\n"
-                +"Drivers without this app's Mesa patches show the picture through X11, which is slower, and "
-                +"may not work with Lossless Scaling. A driver you install turns off the automatic choice of Turnip by GPU. "
-                +"If the game stops, choose Built-in Turnip again.")
+                +"load.\n\nA driver you install replaces the phone's stock driver. "
+                +"If the game stops, choose System driver again.")
             .setNegativeButton("Cancel",null)
             .setPositiveButton("Choose zip",(d,w) -> {
                 Intent pick=new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
@@ -987,39 +877,36 @@ public final class MainActivity extends Activity {
         },"Driver-install");
         install.setDaemon(true); install.start();
     }
-    /** Picks the driver for the next start (null: the system driver / the bundled Turnip) and offers the restart.
-     *  Bionic writes "system" for none; glibc, empty. */
+    /** Picks the driver for the next start (null: the system driver, "system") and offers the restart. */
     private void useDriver(DriverManager.Driver driver) {
-        boolean bionic=bionicRuntime();
-        String id=driver==null ? bionic ? "system" : "" : driver.id, before=setting("gpu_driver");
-        if (before==null || before.equals("system") && !bionic) before="";
-        if (bionic && before.isEmpty()) before="system";
+        String id=driver==null ? "system" : driver.id, before=setting("gpu_driver");
+        if (before==null || before.isEmpty()) before="system";
         if (id.equals(before)) return;
         if (!new SettingsDialog(this,new File(BASE,"bbport.ini"),this::restartGame).set("gpu_driver",id)) {
             toast("Could not save the GPU driver setting."); return;
         }
-        askRestart(driver==null ? bionic ? "the system driver" : "the built-in Turnip" : driver.title());
+        askRestart(driver==null ? "the system driver" : driver.title());
     }
     private void deleteDriver(DriverManager.Driver driver) {
         new AlertDialog.Builder(this).setTitle("Delete "+driver.title()+"?")
             .setNegativeButton("Cancel",(d,w) -> showDrivers())
             .setPositiveButton("Delete",(d,w) -> {
                 boolean active=driver.id.equals(setting("gpu_driver"));
-                if (active) new SettingsDialog(this,new File(BASE,"bbport.ini"),this::restartGame).set("gpu_driver",bionicRuntime() ? "system" : "");
+                if (active) new SettingsDialog(this,new File(BASE,"bbport.ini"),this::restartGame).set("gpu_driver","system");
                 try { drivers.delete(driver.id); }
                 catch (Exception ex) { toast("Could not delete the driver: "+ex.getMessage()); return; }
-                if (active) askRestart(bionicRuntime() ? "the system driver" : "the built-in Turnip"); else showDrivers();
+                if (active) askRestart("the system driver"); else showDrivers();
             }).show();
     }
     private void toast(String message) { android.widget.Toast.makeText(this,message,android.widget.Toast.LENGTH_LONG).show(); }
     private void askRestart(String driver) {
-        if (shmid<0 || displayOnly) return; // the game has not started: it starts with this driver
+        if (!displayReady) return; // the game has not started: it starts with this driver
         new AlertDialog.Builder(this).setTitle("Restart Bloodborne?")
             .setMessage("The game uses "+driver+" after a restart. Any unsaved progress will be lost.")
             .setNegativeButton("Later",null).setPositiveButton("Restart",(d,w) -> restartGame())
             .setOnDismissListener(d -> immersive()).show();
     }
-    /** The last value of a bbport.ini setting (as run-thor.sh reads it), or null. */
+    /** The last value of a bbport.ini setting (as run-bionic.sh reads it), or null. */
     private String setting(String key) {
         String value=null;
         try (BufferedReader r=new BufferedReader(new java.io.FileReader(new File(BASE,"bbport.ini")))) {
@@ -1028,16 +915,12 @@ public final class MainActivity extends Activity {
         } catch (Exception ignored) {}
         return value;
     }
-    /** Frame generation (Lossless Scaling or FSR 3.1) presents 2-4 frames per game frame. Lossless
-     *  Scaling presents them back to back and FIFO spaces them, evenly only when the display runs at
-     *  FPS limit x frames: that mode when the display has it (30x2: 60 Hz, 30x4, 40x3, 60x2: 120 Hz),
-     *  else the fastest one (at the system's 60 Hz generated frames were dropped). Without frame
-     *  generation, the system's choice. */
+    /** Frame generation (FSR 3.1) presents 2 frames per game frame, spaced by FIFO evenly only when the display
+     *  runs at FPS limit x 2: that mode when the display has it (30x2: 60 Hz, 40x2, 60x2: 120 Hz), else the
+     *  fastest one. Without frame generation, the system's choice. */
     private void pickRefreshRate() {
-        String lsfg=setting("lsfg_multiplier");
-        int frames="2".equals(lsfg) || "3".equals(lsfg) || "4".equals(lsfg) ? Integer.parseInt(lsfg)
-            : "1".equals(setting("frame_generation")) ? 2 : 1;
-        String limit=setting("fps_limit"); // as run-thor.sh: 40, 45, 60, 0 (none), else 30
+        int frames="1".equals(setting("frame_generation")) ? 2 : 1;
+        String limit=setting("fps_limit"); // as run-bionic.sh: 40, 45, 60, 0 (none), else 30
         final float target=frames*("40".equals(limit) || "45".equals(limit) || "60".equals(limit)
             ? Integer.parseInt(limit) : "0".equals(limit) ? 1000 : 30);
         main.post(() -> {
@@ -1059,25 +942,18 @@ public final class MainActivity extends Activity {
         if (destroyed) return;
         hadError=false;
         pickRefreshRate();
-        boolean bionic=bionicRuntime();
-        drivers.bionic=bionic;
-        customDriver=!bionic && drivers.find(setting("gpu_driver"))!=null; // only the X11 present is uncounted
-        gameStartedAt=android.os.SystemClock.uptimeMillis();
         new File(BASE,"ime.request").delete(); new File(BASE,"ime.request.result").delete();
         try {
-            Process launched;
-            // The game folder with the mods merged over it: the launch script (run-common.sh) takes it from BB_APP0_DIR.
+            // The game folder with the mods merged over it: the launch script takes it from BB_APP0_DIR.
             java.util.List<String> modsLog=new java.util.ArrayList<>();
             String app0=prepareMods(modsLog);
             for (String line:modsLog) android.util.Log.i("Bloodborne",line);
             java.util.List<String> extra=new java.util.ArrayList<>();
             if (app0!=null) extra.add("BB_APP0_DIR="+app0);
-            if (bionic) {
-                // The surface's size in pixels: the present target of libbbgpu (BB_SCREEN_W/H).
-                int w=surface.getWidth(), h=surface.getHeight();
-                extra.add("BB_SCREEN_W="+(w>0 ? w : 1280)); extra.add("BB_SCREEN_H="+(h>0 ? h : 720));
-                launched=process(extra.toArray(new String[0]),ROOT+"/bin/sh",BASE+"/run-bionic.sh","game");
-            } else launched=process(extra.toArray(new String[0]),ROOT+"/bin/sh",BASE+"/run-thor.sh","game");
+            // The surface's size in pixels: the present target of libbbgpu (BB_SCREEN_W/H).
+            int w=surface.getWidth(), h=surface.getHeight();
+            extra.add("BB_SCREEN_W="+(w>0 ? w : 1280)); extra.add("BB_SCREEN_H="+(h>0 ? h : 720));
+            final Process launched=launchScript(extra.toArray(new String[0]));
             game=launched;
             Thread log=new Thread(() -> {
                 try (BufferedReader r=new BufferedReader(new InputStreamReader(launched.getInputStream()));
@@ -1106,7 +982,7 @@ public final class MainActivity extends Activity {
     }
     @Override protected void onDestroy() {
         destroyed=true; if (driverDownload!=null) driverDownload.close(); if (mods!=null) mods.close(); if (installer!=null) installer.close(); if (updater!=null) updater.close(); pad.reset(); audio.stop(); main.removeCallbacksAndMessages(null);
-        DisplayBridge.stop(); stopGame(); if (xvfb!=null) xvfb.destroyForcibly();
+        stopGame();
         worker.shutdownNow(); super.onDestroy();
     }
 }
