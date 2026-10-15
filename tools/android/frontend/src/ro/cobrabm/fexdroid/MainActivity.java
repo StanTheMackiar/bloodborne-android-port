@@ -556,8 +556,6 @@ public final class MainActivity extends Activity {
             }
         }
     }
-    // TODO(merge): stub, the real one (bbport.ini runtime=) is on branch bionic-runtime; drop this.
-    static boolean bionicRuntime() { return false; }
     private void attach(SurfaceHolder holder) {
         if (destroyed || !holder.getSurface().isValid()) return;
         // Bionic runtime: frames arrive as AHardwareBuffers on a socket (BbPresent); no X server, no shmid.

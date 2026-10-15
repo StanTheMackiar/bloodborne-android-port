@@ -14,7 +14,7 @@ fail=0
 allowed='^(libc\.so|libm\.so|libdl\.so|liblog\.so|libandroid\.so|libnativewindow\.so|libc\+\+_shared\.so|libbbgpu\.so|libbbcpu\.so|libSDL3\.so)$'
 defined() { "$llvm/llvm-nm" -D --defined-only "$@" 2>/dev/null | awk 'NF>=3{print $3}' | sed 's/@.*//'; }
 provided=$(mktemp); trap 'rm -f "$provided"' EXIT
-{ defined "$out/bin/bb-probe" "$out/lib/libbbgpu.so" "$out/lib/libbbcpu.so" "$out/lib/libSDL3.so" "$out/lib/libc++_shared.so"
+{ defined "$out/bin/bb-probe" "$out/lib/libbbgpu.so" "$out/lib/libbbcpu.so" "$out/lib/libc++_shared.so"
   for lib in libc.so libm.so libdl.so liblog.so libandroid.so libnativewindow.so; do defined "$sysroot_libs/$lib"; done; } | sort -u > "$provided"
 for f in "$out/bin/bb-probe" "$out/bin/kgsl-chip-id" "$out/lib/libbbgpu.so" "$out/lib/libbbcpu.so"; do
     echo "== $f"
