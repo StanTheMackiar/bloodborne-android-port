@@ -22,6 +22,9 @@ PKG_TOOL = ROOT / 'out/arm64/pkg-tool/ps4-pkg-tool'  # build_pkg_tool.sh (the bu
 PKG_TOOL_NOTICE = ROOT / 'tools/android/ps4-pkg-tool.NOTICE'
 TURNIP = ROOT / 'out/arm64/turnip'
 TURNIP_GEN8 = ROOT / 'out/arm64/turnip-gen8'
+BIONIC = ROOT / 'out/bionic'  # build_bionic.sh: the Android NDK build, run from the app by run-bionic.sh
+NDK_STRIP = next(iter(sorted((ROOT / '.local-deps/android/sdk/ndk').glob(
+    '*/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip'))), None)
 LSFG = ROOT / 'out/arm64/lsfg'  # build_lsfg.sh: the lsfg-vk 1.0 layer with our Turnip patches
 # The rootfs's Turnip, replaced by TURNIP's (rootfs-relative path: file there).
 TURNIP_FILES = {
@@ -97,11 +100,29 @@ def owned_by_root(member):
     return member
 
 
+def stage_bionic(stage):
+    """The Bionic runtime's bin/ and lib/ without debug info, executable (the app execs them from its data)."""
+    import shutil
+    shutil.rmtree(stage, ignore_errors=True)
+    for directory, names in (('bin', ('bb-probe', 'kgsl-chip-id')), ('lib', None)):
+        (stage / directory).mkdir(parents=True)
+        for path in sorted((BIONIC / directory).iterdir()):
+            if names is not None and path.name not in names:
+                continue
+            target = stage / directory / path.name
+            shutil.copy2(path, target)
+            if NDK_STRIP:
+                subprocess.run([str(NDK_STRIP), '--strip-debug', str(target)], check=True)
+            target.chmod(0o755)
+
+
 def main():
     if not (SOURCE / 'usr/bin/FEX').is_file() or not (SOURCE / 'usr/lib/aarch64-linux-gnu/libvulkan_freedreno.so').is_file():
         raise SystemExit('Missing migrated FEX/Turnip rootfs')
     if not (NATIVE / 'bin/bb-probe').is_file() or not (NATIVE / 'lib/libbbcpu.so').is_file():
         raise SystemExit('Build the native ARM64 bundle first')
+    if not (BIONIC / 'bin/bb-probe').is_file() or not (BIONIC / 'lib/libc++_shared.so').is_file():
+        raise SystemExit('Build the Bionic runtime first: tools/android/build_bionic.sh')
     if not PKG_TOOL.is_file():
         raise SystemExit('Build the PKG tool first: tools/android/build_pkg_tool.sh arm64')
     if not all((TURNIP / name).is_file() for name in TURNIP_FILES.values()):
@@ -117,6 +138,8 @@ def main():
     subprocess.run(['patchelf', '--set-interpreter',
                     '/data/data/com.ducvd89.bloodborne/files/rootfs/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1',
                     str(overlay / 'usr/bin/python3.13')], check=True)
+    bionic = OUT / 'bionic-stage'
+    stage_bionic(bionic)
     archive = OUT / 'runtime.tar.gz'
     with tarfile.open(archive, 'w:gz', compresslevel=6, format=tarfile.PAX_FORMAT) as tar:
         tar.add(SOURCE, arcname='rootfs', filter=scrub)
@@ -138,6 +161,8 @@ def main():
             tar.addfile(info)
         for directory in ('bin', 'lib', 'patch-parts'):
             tar.add(NATIVE / directory, arcname='bbport/arm64/' + directory, filter=without_pkg_tool)
+        # The Bionic runtime next to the glibc one (bbport/arm64): run-bionic.sh starts it.
+        tar.add(bionic, arcname='bbport/bionic', filter=owned_by_root)
         tar.add(LSFG, arcname='bbport/arm64/lsfg', filter=owned_by_root)
         tar.add(PKG_TOOL, arcname='bbport/arm64/bin/ps4-pkg-tool', filter=owned_by_root)
         tar.add(PKG_TOOL_NOTICE, arcname='bbport/licenses/ps4-pkg-tool.NOTICE', filter=owned_by_root)
@@ -147,6 +172,8 @@ def main():
             tar.add(origin, arcname='bbport/scripts/' + script)
         for source, name in (
             ('tools/android/run-thor.sh', 'run-thor.sh'),
+            ('tools/android/run-bionic.sh', 'run-bionic.sh'),
+            ('tools/android/run-common.sh', 'run-common.sh'),
             ('tools/android/mods.sh', 'mods.sh'),
             ('tools/android/fex-compatible.json', 'fex-compatible.json'),
             ('tools/android/thor-gamecontrollerdb.txt', 'thor-gamecontrollerdb.txt'),

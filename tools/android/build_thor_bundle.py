@@ -68,6 +68,7 @@ def main():
     shutil.copy2(ROOT / 'out/content.bin', stage / 'data/content.bin')
     shutil.copy2(ROOT / 'tools/android/thor.ini', stage / 'bbport.ini')
     shutil.copy2(ROOT / 'tools/android/run-thor.sh', stage / 'run-thor.sh')
+    shutil.copy2(ROOT / 'tools/android/run-common.sh', stage / 'run-common.sh')
     shutil.copy2(ROOT / 'tools/android/thor-gamecontrollerdb.txt', stage / 'thor-gamecontrollerdb.txt')
     shutil.copy2(ROOT / 'tools/android/fex-compatible.json', stage / 'fex-compatible.json')
     elf = stage / 'data/eboot.elf'

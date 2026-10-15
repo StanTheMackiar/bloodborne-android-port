@@ -46,21 +46,26 @@ final class RuntimeInstaller {
         return out.toString();
     }
 
+    /** The runtime's key programs are there and executable: the glibc rootfs, its native bundle and the Bionic runtime. */
+    private static boolean installed(File files) {
+        return new File(files, "rootfs/usr/bin/Xvfb").canExecute() &&
+                new File(files, "bbport/arm64/bin/bb-probe").canExecute() &&
+                new File(files, "bbport/bionic/bin/bb-probe").canExecute();
+    }
+
     /** Synchronized: the game's start and the PKG/mod installers (before their first script) both call it. */
     static synchronized void ensure(Context context, File files, Consumer<String> status) throws Exception {
         String expected;
         try (InputStream in = context.getAssets().open("runtime.sha256")) {
             expected = new String(readAll(in), StandardCharsets.US_ASCII).trim();
         } catch (java.io.FileNotFoundException missing) {
-            if (new File(files, "rootfs/usr/bin/Xvfb").canExecute() &&
-                    new File(files, "bbport/arm64/bin/bb-probe").canExecute()) return;
+            if (installed(files)) return;
             throw new IllegalStateException("This APK does not contain the runtime", missing);
         }
         if (!expected.matches("[0-9a-f]{64}")) throw new IllegalStateException("Invalid runtime digest");
         File marker = new File(files, ".runtime.sha256");
         if (marker.isFile() && expected.equals(new String(Files.readAllBytes(marker.toPath()), StandardCharsets.US_ASCII).trim()) &&
-                new File(files, "rootfs/usr/bin/Xvfb").canExecute() &&
-                new File(files, "bbport/arm64/bin/bb-probe").canExecute()) return;
+                installed(files)) return;
 
         status.accept("Installing Bloodborne runtime…");
         File archive = new File(files, "runtime.tar.gz.part");
@@ -80,14 +85,14 @@ final class RuntimeInstaller {
             // Older installs have absolute links out of the rootfs. Android's tar safely
             // rejects overwriting them, so replace only the bundled runtime tree.
             deleteTree(new File(files, "rootfs"));
+            deleteTree(new File(files, "bbport/bionic")); // no stale libraries beside the new ones
             Process tar = new ProcessBuilder("/system/bin/tar", "-oxzf", archive.getAbsolutePath(),
                     "-C", files.getAbsolutePath()).redirectErrorStream(true).start();
             byte[] log;
             try (InputStream in = tar.getInputStream()) { log = readAll(in); }
             if (tar.waitFor() != 0) throw new IllegalStateException("Runtime extraction failed: " +
                     new String(log, 0, Math.min(log.length, 2048), StandardCharsets.UTF_8));
-            if (!new File(files, "rootfs/usr/bin/Xvfb").canExecute() ||
-                    !new File(files, "bbport/arm64/bin/bb-probe").canExecute())
+            if (!installed(files))
                 throw new IllegalStateException("Runtime archive is incomplete");
             Files.write(marker.toPath(), (expected + "\n").getBytes(StandardCharsets.US_ASCII));
         } finally {
