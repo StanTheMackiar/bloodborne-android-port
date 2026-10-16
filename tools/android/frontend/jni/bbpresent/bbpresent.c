@@ -6,7 +6,8 @@
  * them frames are dropped (released at once) and start() says so. All state is behind one mutex.
  * The receive thread owns the socket; the display callbacks (any thread) answer RELEASE.
  *
- * Two presentation modes, chosen by the game in HELLO (BB_PRESENT_FLAG_FIFO; bbport.ini vsync):
+ * Two presentation modes, chosen by the game in HELLO (BB_PRESENT_FLAG_FIFO; bbport.ini vsync, or Lossless
+ * Scaling frame generation) and changed by its MODE message while it runs (set_fifo):
  *
  *  - Newest wins ("VSync off", the default): present_frame() applies a transaction per FRAME at once.
  *    SurfaceFlinger latches at most one buffer per refresh, so frames that arrive within one refresh
@@ -316,6 +317,53 @@ static void pump_queue(void) {
     }
 }
 
+/* Warns once that FIFO may run at half rate (API 29/30: no commit callback). */
+static void warn_fifo_without_commit(void) {
+    static int warned;
+    if (!warned && !api.set_on_commit) {
+        warned = 1;
+        LOGI("no ASurfaceTransaction_setOnCommit (needs Android 12): FIFO waits for the frame to be "
+             "presented before the next, which may halve the frame rate");
+    }
+}
+
+/* The game's MODE message: FIFO <-> newest wins, between two frames. Lock held.
+ *  - FIFO -> newest wins: the newest queued frame is applied now (if it can be shown), every older
+ *    queued frame is released unseen with its own acquire fence, as for any frame the display does
+ *    not take. The transaction still outstanding stays (its callbacks only answer RELEASE now: they
+ *    clear S.inflight only in FIFO mode, and S.inflight is 0 from here).
+ *  - newest wins -> FIFO: nothing is queued yet and nothing outstanding counts, so the next frame is
+ *    applied at once and the ones after it queue behind its commit. */
+static void set_fifo(int fifo) {
+    fifo = fifo != 0;
+    if (fifo == S.fifo) return;
+    S.fifo = fifo;
+    S.inflight = 0;
+    if (!fifo) {
+        Queued newest = {0};
+        int have = 0;
+        while (S.queue_len) {
+            Queued q = S.queue[S.queue_head];
+            S.queue_head = (S.queue_head + 1) % BB_PRESENT_MAX_BUFFERS;
+            S.queue_len--;
+            if (have) send_release(newest.generation, newest.index, newest.frame, newest.fence); /* replaced unseen */
+            newest = q;
+            have = 1;
+        }
+        S.queue_head = 0;
+        if (have) {
+            if (!S.sc || !api.ok || newest.generation != S.generation || newest.index >= S.count ||
+                !S.bufs[newest.index])
+                send_release(newest.generation, newest.index, newest.frame, newest.fence);
+            else
+                show_frame(newest.generation, newest.index, newest.frame, newest.width, newest.height, newest.fence);
+        }
+    } else {
+        warn_fifo_without_commit();
+    }
+    LOGI("presentation: %s", fifo ? "FIFO (VSync on)" : "newest frame (VSync off)");
+}
+
 static void present_frame(const bb_present_msg* m, int acquire_fd) {
     if (m->generation != S.generation || m->index >= S.count || !S.bufs[m->index]) {
         if (acquire_fd >= 0) close(acquire_fd);
@@ -411,14 +459,7 @@ static void serve(int fd) {
             S.count = m.count;
             S.fifo = (m.flags & BB_PRESENT_FLAG_FIFO) != 0;
             LOGI("presentation: %s", S.fifo ? "FIFO (VSync on)" : "newest frame (VSync off)");
-            if (S.fifo && !api.set_on_commit) {
-                static int warned;
-                if (!warned) {
-                    warned = 1;
-                    LOGI("no ASurfaceTransaction_setOnCommit (needs Android 12): FIFO waits for the frame to be "
-                         "presented before the next, which may halve the frame rate");
-                }
-            }
+            if (S.fifo) warn_fifo_without_commit();
             bb_present_msg a = bb_present_make(BB_PRESENT_HELLO);
             a.generation = m.generation;
             a.flags = m.flags & BB_PRESENT_FLAGS_KNOWN; /* what the app will do */
@@ -445,6 +486,9 @@ static void serve(int fd) {
             }
             break;
         }
+        case BB_PRESENT_MODE:
+            set_fifo((m.flags & BB_PRESENT_FLAG_FIFO) != 0);
+            break;
         case BB_PRESENT_FRAME:
             present_frame(&m, fence);
             fence = -1;

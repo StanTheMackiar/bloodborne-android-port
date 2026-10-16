@@ -53,7 +53,7 @@ public final class MainActivity extends Activity {
     private LinearLayout drawerItems;
     private TextView status;
     private View resume;
-    private LinearLayout gameSettingsItem, cheatsItem, modsItem, graphicsItem, driverItem, controllerItem, folderItem;
+    private LinearLayout gameSettingsItem, cheatsItem, modsItem, graphicsItem, frameGenItem, driverItem, controllerItem, folderItem;
     private TouchControllerOverlay controllerOverlay;
     private PadBridge pad;
     private AudioBridge audio;
@@ -204,7 +204,13 @@ public final class MainActivity extends Activity {
         section("Graphics");
         graphicsItem=menuItem("ic_tune","Graphics settings","",() -> {
             closeDrawer();
-            new SettingsDialog(this,new File(BASE,"bbport.ini"),this::restartGame).withLossless(lossless).show();
+            new SettingsDialog(this,new File(BASE,"bbport.ini"),this::restartGame).show();
+        });
+        // Lossless Scaling frame generation: applies at once, no restart (bbport/lsfg.state, which libbbgpu follows).
+        frameGenItem=menuItem("ic_layers","Frame generation","",() -> {
+            closeDrawer();
+            SettingsDialog ini=new SettingsDialog(this,new File(BASE,"bbport.ini"),this::restartGame);
+            new FrameGenDialog(this,ini,new File(BASE,"lsfg.state"),lossless,this::pickRefreshRate).show();
         });
         driverItem=menuItem("ic_memory","GPU driver","",() -> { closeDrawer(); showDrivers(); });
 
@@ -309,10 +315,10 @@ public final class MainActivity extends Activity {
         mods.summary(text -> setDetail(modsItem,text));
         String upscaler="off".equals(setting("upscaler")) ? "No upscaling" : "FSR 3.1";
         String limit=setting("fps_limit");
-        String lsfg=setting("lsfg_multiplier");
         setDetail(graphicsItem,upscaler+" · "+("0".equals(limit) ? "no FPS limit"
-            : (limit==null || !limit.matches("40|45|60") ? "30" : limit)+" FPS limit")
-            +(lsfg!=null && lsfg.matches("[234]") ? " · Lossless Scaling ×"+lsfg+(losslessDll()==null ? " (no Lossless.dll)" : "") : ""));
+            : (limit==null || !limit.matches("40|45|60") ? "30" : limit)+" FPS limit"));
+        setDetail(frameGenItem,FrameGenDialog.summary(setting("frame_generation"),setting("upscaler"),setting("lsfg_multiplier"),
+            losslessDll()!=null));
         DriverManager.Driver driver=drivers.find(setting("gpu_driver"));
         setDetail(driverItem,driver==null ? "System driver (stock)" : driver.title());
         setDetail(controllerItem,controllerEnabled() ? "On" : "Off");
@@ -563,7 +569,7 @@ public final class MainActivity extends Activity {
             if (dll.isFile() && dll.length()>0) return dll;
         return null;
     }
-    private final SettingsDialog.LosslessHost lossless=new SettingsDialog.LosslessHost() {
+    private final FrameGenDialog.LosslessHost lossless=new FrameGenDialog.LosslessHost() {
         @Override public File dll() { return losslessDll(); }
         @Override public void signIn(Runnable done) {
             new SteamDllDialog(MainActivity.this,new File(BASE,"Lossless.dll"),() -> { immersive(); if (done!=null) done.run(); }).show();
@@ -602,7 +608,7 @@ public final class MainActivity extends Activity {
             final String failure=problem;
             main.post(() -> {
                 if (destroyed) return;
-                toast(failure==null ? "Lossless.dll is ready. It applies when the game restarts." : "Lossless.dll not saved: "+failure);
+                toast(failure==null ? "Lossless.dll is ready." : "Lossless.dll not saved: "+failure);
                 immersive();
                 if (done!=null) done.run();
             });

@@ -131,10 +131,25 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
       instance{window, EmulatorSettings.GetGpuId(), EmulatorSettings.IsVkValidationEnabled(),
                EmulatorSettings.IsVkCrashDiagnosticEnabled()},
       draw_scheduler{instance, true}, present_scheduler{instance}, flip_scheduler{instance},
-      swapchain{instance, window}, runtime{instance, draw_scheduler},
+#ifdef __ANDROID__
+      // bbport: Lossless Scaling frame generation first: the multiplier that runs at start sets the
+      // swapchain's buffer count and the app's presentation mode (the state file, bb_lsfg_state.h).
+      lsfg_requested{BbLsfgState::Initial()}, lsfg_watch{lsfg_requested},
+      lsfg{Lsfg::Create(instance, lsfg_requested)},
+      swapchain{instance, window, lsfg ? lsfg->Multiplier() : 0},
+#else
+      swapchain{instance, window},
+#endif
+      runtime{instance, draw_scheduler},
       rasterizer{std::make_unique<Rasterizer>(instance, draw_scheduler, runtime, liverpool)},
       texture_cache{rasterizer->GetTextureCache()} {
+#ifdef __ANDROID__
+    // bbport: the pools below are sized for the most buffers the swapchain can have (frame
+    // generation can be turned on while the game runs: multiplier + 3).
+    const u32 num_images = std::max(swapchain.GetImageCount(), Swapchain::MaxImageCount());
+#else
     const u32 num_images = swapchain.GetImageCount();
+#endif
     const vk::Device device = instance.GetDevice();
 
     // Create presentation frames.
@@ -158,9 +173,6 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
     fsr_pass.Create(device, instance.GetAllocator(), num_images);
     pp_pass.Create(device, swapchain.GetSurfaceFormat().format);
     BbOverlay::Init(instance, swapchain.GetSurfaceFormat().format, num_images);
-#ifdef __ANDROID__
-    lsfg = Lsfg::Create(instance); // bbport: Lossless Scaling frame generation, when it is on
-#endif
 }
 
 Presenter::~Presenter() {
@@ -648,6 +660,10 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         free_frame();
         return;
     }
+#ifdef __ANDROID__
+    // bbport: a change of the app's Lossless Scaling settings applies here, between two frames.
+    PollLsfgState();
+#endif
     // Recreate the swapchain if the window was resized (or was minimised at the last try).
     if (window.GetWidth() != swapchain.GetWidth() || window.GetHeight() != swapchain.GetHeight() ||
         !swapchain.IsPresentable()) {
@@ -670,6 +686,9 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
             free_frame();
             DebugState.IncFlipFrameNum();
             return;
+        }
+        if (!lsfg) {
+            ApplyLsfgOutputMode(); // it failed and is off now: normal buffers and mode again
         }
     }
 #endif
@@ -886,6 +905,48 @@ bool Presenter::SendToApp() {
 }
 
 #ifdef __ANDROID__
+void Presenter::PollLsfgState() {
+    BbLsfgState::State next;
+    if (!lsfg_watch.Poll(next)) {
+        return;
+    }
+    // The same as before is nothing to do, unless it is on and not running: the file was written
+    // again (the player added Lossless.dll and pressed Apply), so try once more.
+    if (next == lsfg_requested && (lsfg || !next.On())) {
+        return;
+    }
+    ApplyLsfgState(next);
+}
+
+void Presenter::ApplyLsfgState(const BbLsfgState::State& next) {
+    lsfg_requested = next;
+    // At a frame boundary: this runs on the present thread, between two Present() calls, so no
+    // buffer of a cycle is held and nothing of the old frame generation is in use. Its flow scale,
+    // model and generated-frame count are fixed when the framegen starts, so every change of an
+    // on state is a new Lsfg: the old one waits for its last batch and the game device, destroys
+    // its context, the shared buffers and the framegen runtime (the library stays loaded); the new
+    // one starts its runtime and makes its context with the next real frame (the first frames after
+    // that only fill its history, as at start).
+    lsfg.reset();
+    if (next.On()) {
+        lsfg = Lsfg::Create(instance, next);
+    }
+    // The swapchain follows what runs, not what was asked: the buffer count for the multiplier and
+    // FIFO (frame generation needs every frame shown for a refresh) only while it is on.
+    ApplyLsfgOutputMode();
+    if (lsfg) {
+        std::printf("LSFG: now x%u, flow %.2f, performance %d\n", next.multiplier,
+                    static_cast<double>(next.flow), next.performance ? 1 : 0);
+    } else {
+        std::printf("LSFG: off\n");
+    }
+    std::fflush(stdout);
+}
+
+void Presenter::ApplyLsfgOutputMode() {
+    swapchain.SetFrameGeneration(lsfg ? lsfg->Multiplier() : 0);
+}
+
 bool Presenter::PresentWithLsfg(Frame* frame) {
     using Clock = std::chrono::steady_clock;
     // The frame's own submission may go out from a recording thread: it must be queued before the

@@ -12,6 +12,7 @@
 #include <string>
 #include <type_traits>
 #include "bb_lsfg.h"
+#include "bb_lsfg_state.h"
 #include "common/logging/log.h"
 #include "vk_driver_loader.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -33,16 +34,6 @@ constexpr u32 FormatRgba16f = 97; // VK_FORMAT_R16G16B16A16_SFLOAT
 std::string EnvString(const char* name) {
     const char* value = std::getenv(name);
     return value ? value : "";
-}
-
-double EnvDouble(const char* name, double fallback) {
-    const char* value = std::getenv(name);
-    if (!value || !*value) {
-        return fallback;
-    }
-    char* end = nullptr;
-    const double parsed = std::strtod(value, &end);
-    return end != value ? parsed : fallback;
 }
 
 bool EnvFlag(const char* name, bool fallback) {
@@ -99,14 +90,20 @@ struct Lsfg::Stats {
     double present_ms{0.0};
 };
 
-std::unique_ptr<Lsfg> Lsfg::Create(const Instance& instance) {
-    const char* value = std::getenv("BB_LSFG_MULTIPLIER");
-    const long multiplier = value ? std::strtol(value, nullptr, 10) : 0;
-    if (multiplier < 2 || multiplier > 4) {
+std::unique_ptr<Lsfg> Lsfg::Create(const Instance& instance, const BbLsfgState::State& state) {
+    if (!state.On()) {
+        return nullptr;
+    }
+    // FSR 3.1 frame generation (BB_FRAME_GEN, set at start by run-bionic.sh) makes the frames in
+    // the upscaler: the two never run together. The app keeps them exclusive; this is the last word.
+    if (const char* fsr = std::getenv("BB_FRAME_GEN"); fsr && fsr[0] == '1') {
+        std::printf("LSFG: off (FSR 3.1 frame generation is on: turn it off in Graphics settings and restart)\n");
+        std::fflush(stdout);
         return nullptr;
     }
     std::unique_ptr<Lsfg> lsfg{new Lsfg(instance)};
-    lsfg->multiplier = static_cast<u32>(multiplier);
+    lsfg->settings = state;
+    lsfg->multiplier = state.multiplier;
     if (!lsfg->Initialize()) {
         return nullptr;
     }
@@ -118,6 +115,11 @@ Lsfg::Lsfg(const Instance& instance_) : instance{instance_}, api{std::make_uniqu
 
 Lsfg::~Lsfg() {
     const vk::Device device = instance.GetDevice();
+    // The framegen device may still be working on the last batch: wait for it before the context
+    // and the buffers it writes go.
+    if (context && context->id >= 0 && context->frame > 0 && api->started && api->wait) {
+        api->wait(context->id, WaitNs);
+    }
     if (device) {
         static_cast<void>(device.waitIdle());
     }
@@ -141,9 +143,8 @@ Lsfg::~Lsfg() {
         }
         device.destroyFence(copy_done);
     }
-    if (api->library) {
-        dlclose(api->library);
-    }
+    // The library stays loaded (never dlclose'd): frame generation can be turned on again while
+    // the game runs, and dlopen of it again would find it in the same state anyway.
 }
 
 void Lsfg::Disable(const char* reason) {
@@ -169,10 +170,9 @@ bool Lsfg::Initialize() {
         std::fflush(stdout);
         return false;
     };
-    const std::string dll = EnvString("BB_LSFG_DLL");
-    struct stat st{};
-    if (dll.empty() || stat(dll.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) {
-        return fail("no Lossless.dll" + (dll.empty() ? std::string{} : ": " + dll));
+    const std::string dll = BbLsfgState::FindDll();
+    if (dll.empty()) {
+        return fail("no Lossless.dll: bbport/Lossless.dll or Bloodborne/Lossless.dll of shared storage");
     }
     const std::string lib_path = EnvString("BB_LSFG_LIB").empty() ? "liblsfg-bb.so" : EnvString("BB_LSFG_LIB");
     api->library = dlopen(lib_path.c_str(), RTLD_NOW | RTLD_LOCAL);
@@ -198,8 +198,8 @@ bool Lsfg::Initialize() {
     const auto& ids = props_chain.get<vk::PhysicalDeviceIDProperties>();
     std::memcpy(config.device_uuid, ids.deviceUUID.data(), 16);
     std::memcpy(config.driver_uuid, ids.driverUUID.data(), 16);
-    config.flow_scale = static_cast<float>(std::clamp(EnvDouble("BB_LSFG_FLOW_SCALE", 0.75), 0.25, 1.0));
-    config.performance = EnvFlag("BB_LSFG_PERFORMANCE", true) ? 1 : 0;
+    config.flow_scale = std::clamp(settings.flow, 0.25f, 1.0f);
+    config.performance = settings.performance ? 1 : 0;
     config.generation_count = static_cast<int32_t>(multiplier - 1);
     shared_format = EnvString("BB_LSFG_FORMAT") == "rgba8" ? FormatRgba8 : FormatRgba16f;
     config.shared_format = static_cast<int32_t>(shared_format);

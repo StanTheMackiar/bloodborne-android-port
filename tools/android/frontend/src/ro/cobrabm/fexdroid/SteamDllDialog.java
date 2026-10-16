@@ -196,7 +196,7 @@ final class SteamDllDialog implements IAuthenticator {
 
             download(steam,scope);
             finished=true;
-            status("Lossless.dll is ready. Turn on Lossless Scaling in the Graphics settings; it applies when the game restarts.");
+            status("Lossless.dll is ready. Turn on Lossless Scaling in Frame generation (menu); it applies at once.");
         } catch (Throwable e) {
             android.util.Log.w("Bloodborne","Steam: Lossless.dll download failed: "+safe(message(e))); // no stack: it can quote request URLs
             if (!finished) status(message(e));

@@ -64,18 +64,37 @@ export BB_FULLSCREEN=1 BB_UPSCALER=$upscaler BB_UPSCALE_PRESET=$preset
 # the framegen of GameNative's lsfg-vk fork, on the game's own Vulkan driver) which reads its shaders from
 # the player's own Lossless.dll: bbport/Lossless.dll (the app's Steam sign-in or file picker), else the
 # Bloodborne folder of shared storage. It replaces FSR 3.1 frame generation. Generated frames only look
-# right when each is shown for one refresh: it turns VSync (the app's FIFO) on, and the app sets the
-# display to FPS limit x multiplier (MainActivity.pickRefreshRate). No Lossless.dll: one line, and off.
-lsfg=$(setting lsfg_multiplier)
-case $lsfg in 2|3|4) ;; *) lsfg= ;; esac
+# right when each is shown for one refresh: while it runs libbbgpu asks the app for its FIFO (VSync), and
+# the app sets the display to FPS limit x multiplier (MainActivity.pickRefreshRate).
+# It is LIVE: the app's Frame generation menu rewrites bbport/lsfg.state (BB_LSFG_STATE_FILE) while the
+# game runs and libbbgpu follows it (turns it on, off, or to another multiplier / flow scale / model with
+# no restart). That file is the one source of truth for the three settings; here is only its start,
+# written from bbport.ini (like cheats.state), so no BB_LSFG_MULTIPLIER/FLOW_SCALE/PERFORMANCE are exported.
+# BB_LSFG_DLL is exported when a Lossless.dll is found; libbbgpu looks again when frame generation is
+# turned on (the player may sign in to Steam meanwhile).
+# What cannot follow it live is decided here, from the multiplier at start: that FSR 3.1 frame
+# generation is off (it is a setting of the upscaler: exclusive with this) and the 30 FPS limit's
+# delta-time patch (below: patches load when the game starts).
+lsfg_requested=$(setting lsfg_multiplier)
+case $lsfg_requested in 2|3|4) ;; *) lsfg_requested=0 ;; esac
+lsfg=$lsfg_requested
+[ "$lsfg" = 0 ] && lsfg=
+lsfg_dll=${BB_LSFG_DLL:-}
+if [ ! -f "$lsfg_dll" ]; then
+    lsfg_dll=
+    for dll in "$base/Lossless.dll" /storage/emulated/0/Bloodborne/Lossless.dll; do
+        [ -f "$dll" ] && { lsfg_dll=$dll; break; }
+    done
+fi
+unset BB_LSFG_DLL BB_LSFG_MULTIPLIER BB_LSFG_FLOW_SCALE BB_LSFG_PERFORMANCE
+[ -n "$lsfg_dll" ] && export BB_LSFG_DLL=$lsfg_dll
+flow=$(setting lsfg_flow_scale)
+case $flow in 0.25|0.[3-9]|0.[3-9]0|0.[3-9]5|1.00|1.0|1) ;; *) flow=0.75 ;; esac
+performance=1; [ "$(setting lsfg_performance)" = 0 ] && performance=0
+export BB_LSFG_STATE_FILE="$base/lsfg.state"
+printf 'multiplier=%s\nflow=%s\nperformance=%s\n' "$lsfg_requested" "$flow" "$performance" \
+    > "$BB_LSFG_STATE_FILE.tmp" && mv "$BB_LSFG_STATE_FILE.tmp" "$BB_LSFG_STATE_FILE"
 if [ -n "$lsfg" ]; then
-    lsfg_dll=${BB_LSFG_DLL:-}
-    if [ ! -f "$lsfg_dll" ]; then
-        lsfg_dll=
-        for dll in "$base/Lossless.dll" /storage/emulated/0/Bloodborne/Lossless.dll; do
-            [ -f "$dll" ] && { lsfg_dll=$dll; break; }
-        done
-    fi
     if [ -z "$lsfg_dll" ]; then
         echo "Lossless Scaling frame generation: no Lossless.dll ($base/Lossless.dll or /storage/emulated/0/Bloodborne/Lossless.dll): off"
         lsfg=
@@ -83,13 +102,11 @@ if [ -n "$lsfg" ]; then
         echo "Lossless Scaling frame generation: $bionic/lib/liblsfg-bb.so is missing: off"
         lsfg=
     else
-        flow=$(setting lsfg_flow_scale)
-        case $flow in 0.25|0.[3-9]|0.[3-9]0|0.[3-9]5|1.00|1.0|1) ;; *) flow=0.75 ;; esac
-        performance=1; [ "$(setting lsfg_performance)" = 0 ] && performance=0
         unset BB_FRAME_GEN
-        export BB_LSFG_MULTIPLIER=$lsfg BB_LSFG_FLOW_SCALE=$flow BB_LSFG_PERFORMANCE=$performance BB_LSFG_DLL=$lsfg_dll
-        echo "Lossless Scaling frame generation: x$lsfg, flow scale $flow, performance mode $performance, $lsfg_dll"
+        echo "Lossless Scaling frame generation: x$lsfg, flow scale $flow, performance mode $performance, $lsfg_dll (live: $BB_LSFG_STATE_FILE)"
     fi
+else
+    echo "Lossless Scaling frame generation: off at start (the app's Frame generation menu turns it on while you play)"
 fi
 # The GPU's check of indirect dispatch counts (vk_indirect_guard.h) is off; BB_INDIRECT_GUARD=1 in
 # bionic-local.sh turns it on.
@@ -112,16 +129,19 @@ fps_limit=$(setting fps_limit)
 case $fps_limit in 40|45|60|0) export BB_VBLANK_HZ=480 BB_FPS_LIMIT=$fps_limit ;;
     *) fps_limit=30; export BB_VBLANK_HZ=60 ;; esac
 # Frame generation adds frames on screen only: at the game's own 30 FPS timing a slower frame still
-# slows the game down. With it, 30 means the delta-time patch at 30 real frames a second.
+# slows the game down. With it, 30 means the delta-time patch at 30 real frames a second. This is
+# decided at start (patches load with the game): Lossless Scaling turned on later, at the 30 FPS limit,
+# runs on the game's own timing until the next start, and turned off later it keeps the patch.
 if { [ "${BB_FRAME_GEN:-0}" = 1 ] || [ -n "$lsfg" ]; } && [ "$fps_limit" = 30 ]; then
     fps_limit=30-delta; export BB_VBLANK_HZ=480 BB_FPS_LIMIT=30
 fi
 # VSync (vsync=1): the app shows every frame for at least one display refresh, in order (a FIFO in
 # the app: libbbgpu says so in HELLO, bb_present_proto.h), which also holds the game to the refresh
 # rate when there is no FPS limit; 0: the newest frame is shown, frames that finish within one
-# refresh are skipped. Lossless Scaling needs the FIFO whatever this says. BB_VSYNC=0/1 in
+# refresh are skipped. Lossless Scaling needs the FIFO whatever this says: libbbgpu asks the app for it
+# (BB_PRESENT_MODE) while frame generation runs, so BB_VSYNC is the setting alone. BB_VSYNC=0/1 in
 # bionic-local.sh overrides.
-if [ "$(setting vsync)" = 1 ] || [ -n "$lsfg" ]; then export BB_VSYNC=1; else export BB_VSYNC=0; fi
+if [ "$(setting vsync)" = 1 ]; then export BB_VSYNC=1; else export BB_VSYNC=0; fi
 # CPU cores (thor_cpus, a taskset list such as 3-7): empty for all of them.
 [ -z "${BB_THOR_CPUS:-}" ] && BB_THOR_CPUS=$(setting thor_cpus)
 

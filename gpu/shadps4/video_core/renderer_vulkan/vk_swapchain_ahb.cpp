@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include "bb_lsfg_state.h"
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "imgui/renderer/imgui_core.h"
@@ -24,20 +25,17 @@ constexpr u64 AhbUsage = AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT |
                          AHARDWAREBUFFER_USAGE_COMPOSER_OVERLAY;
 
 /// BB_PRESENT_BUFFERS: the number of buffers (3 by default: one shown, one pending, one rendered).
-/// With Lossless Scaling frame generation (BB_LSFG_MULTIPLIER 2-4) a cycle holds one buffer per
-/// frame it shows (the multiplier) while the app still has the last ones: multiplier + 3.
-u32 BufferCount() {
+/// With Lossless Scaling frame generation (multiplier 2-4) a cycle holds one buffer per frame it shows
+/// (the multiplier) while the app still has the last ones: multiplier + 3.
+u32 BufferCount(u32 lsfg_multiplier) {
     if (const char* value = std::getenv("BB_PRESENT_BUFFERS")) {
         const long count = std::strtol(value, nullptr, 10);
         if (count >= 2 && count <= static_cast<long>(8)) {
             return static_cast<u32>(count);
         }
     }
-    if (const char* value = std::getenv("BB_LSFG_MULTIPLIER")) {
-        const long multiplier = std::strtol(value, nullptr, 10);
-        if (multiplier >= 2 && multiplier <= 4) {
-            return static_cast<u32>(multiplier + 3);
-        }
+    if (lsfg_multiplier >= 2 && lsfg_multiplier <= 4) {
+        return lsfg_multiplier + 3;
     }
     return 3;
 }
@@ -54,9 +52,13 @@ bool WaitSyncFile(int fd, int timeout_ms) {
 
 } // namespace
 
-Swapchain::Swapchain(const Instance& instance_, const Frontend::WindowSDL& window_)
+u32 Swapchain::MaxImageCount() {
+    return BufferCount(BbLsfgState::FilePath() ? 4 : 0); // the buffer count can follow the live state
+}
+
+Swapchain::Swapchain(const Instance& instance_, const Frontend::WindowSDL& window_, u32 lsfg_multiplier)
     : instance{instance_}, window{window_} {
-    image_count = BufferCount();
+    image_count = BufferCount(lsfg_multiplier);
     const vk::PhysicalDeviceExternalSemaphoreInfo semaphore_info{
         .handleType = vk::ExternalSemaphoreHandleTypeFlagBits::eSyncFd,
     };
@@ -67,7 +69,8 @@ Swapchain::Swapchain(const Instance& instance_, const Frontend::WindowSDL& windo
         "The Vulkan driver cannot export and import sync-file semaphores (SYNC_FD): the AHB "
         "swapchain cannot synchronize with the app");
     if (BbPresent::Client::Configured()) {
-        if (!client.Connect(window.GetWidth(), window.GetHeight(), AhbFormat, image_count)) {
+        if (!client.Connect(window.GetWidth(), window.GetHeight(), AhbFormat, image_count,
+                            BbPresent::Client::VsyncRequested() || lsfg_multiplier >= 2)) {
             std::printf("Present: no connection to the app: frames are rendered but not shown\n");
         }
     } else {
@@ -246,6 +249,18 @@ void Swapchain::CreateBuffer(u32 index) {
     buffer.view = view;
     SetObjectName(device, image, "AHB swapchain image {}", index);
     SetObjectName(device, view, "AHB swapchain view {}", index);
+}
+
+void Swapchain::SetFrameGeneration(u32 lsfg_multiplier) {
+    if (client.Connected() &&
+        !client.SetFifo(BbPresent::Client::VsyncRequested() || lsfg_multiplier >= 2)) {
+        PeerGone();
+    }
+    const u32 count = BufferCount(lsfg_multiplier);
+    if (count != image_count) {
+        image_count = count;
+        Recreate(width != 0 ? width : window.GetWidth(), height != 0 ? height : window.GetHeight());
+    }
 }
 
 void Swapchain::Recreate(u32 width_, u32 height_) {

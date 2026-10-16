@@ -38,8 +38,20 @@ class Instance;
 
 class Swapchain {
 public:
-    explicit Swapchain(const Instance& instance, const Frontend::WindowSDL& window);
+    /// `lsfg_multiplier`: the Lossless Scaling frame generation multiplier at start (0: off); it
+    /// sets the buffer count and the presentation mode of the first HELLO.
+    explicit Swapchain(const Instance& instance, const Frontend::WindowSDL& window,
+                       u32 lsfg_multiplier = 0);
     ~Swapchain();
+
+    /// Lossless Scaling frame generation turned on, off or to another multiplier while the game runs
+    /// (0: off). Tells the app the presentation mode (FIFO while it is on, else BB_VSYNC's) and, when
+    /// the buffer count changes with it (a cycle holds one buffer per frame it shows), makes the
+    /// buffers again: RESET and new BUFFERs, like a resize. Call between frames: every buffer
+    /// acquired but not sent is void afterwards (Generation() changes).
+    void SetFrameGeneration(u32 lsfg_multiplier);
+    /// The most buffers the swapchain may ever have in this run (what a pool sized per buffer needs).
+    static u32 MaxImageCount();
 
     /// Creates (or recreates) the buffers with a given size.
     void Create(u32 width, u32 height);

@@ -35,17 +35,10 @@ bool Client::Configured() {
 
 bool Client::VsyncRequested() {
     const char* value = std::getenv("BB_VSYNC");
-    if (value && std::strtol(value, nullptr, 10) != 0) {
-        return true;
-    }
-    // Lossless Scaling frame generation (vk_lsfg.h) needs every frame shown for one refresh, in order,
-    // whatever the VSync setting says: the generated frames are only right that way.
-    const char* multiplier = std::getenv("BB_LSFG_MULTIPLIER");
-    const long frames = multiplier ? std::strtol(multiplier, nullptr, 10) : 0;
-    return frames >= 2 && frames <= 4;
+    return value && std::strtol(value, nullptr, 10) != 0;
 }
 
-bool Client::Connect(u32 width, u32 height, u32 format, u32 count) {
+bool Client::Connect(u32 width, u32 height, u32 format, u32 count, bool fifo) {
     const char* path = SocketPath();
     if (!path) {
         return false;
@@ -91,7 +84,7 @@ bool Client::Connect(u32 width, u32 height, u32 format, u32 count) {
     hello.height = height;
     hello.format = format;
     hello.count = count;
-    hello.flags = VsyncRequested() ? BB_PRESENT_FLAG_FIFO : 0;
+    hello.flags = fifo ? BB_PRESENT_FLAG_FIFO : 0;
     if (!SendRaw(&hello, -1)) {
         Disconnect();
         return false;
@@ -120,6 +113,7 @@ bool Client::Connect(u32 width, u32 height, u32 format, u32 count) {
         std::printf("Present: the app does not show frames the way asked (flags %#x, answered %#x)\n",
                     hello.flags, answer.flags);
     }
+    fifo_mode = fifo;
     std::printf("Present: connected to the app (protocol %u), %u buffers %ux%u, %s\n", answer.version,
                 count, width, height,
                 (answer.flags & BB_PRESENT_FLAG_FIFO) ? "VSync on (every frame shown for a refresh)"
@@ -133,6 +127,26 @@ bool Client::SendRaw(const void* msg, int fence_fd) {
         std::printf("Present: send failed: %s\n", std::strerror(-result));
         return false;
     }
+    return true;
+}
+
+bool Client::SetFifo(bool fifo) {
+    if (fifo == fifo_mode) {
+        return true;
+    }
+    fifo_mode = fifo;
+    if (fd < 0) {
+        return false;
+    }
+    bb_present_msg mode = bb_present_make(BB_PRESENT_MODE);
+    mode.flags = fifo ? BB_PRESENT_FLAG_FIFO : 0;
+    std::scoped_lock lock{send_mutex};
+    if (!SendRaw(&mode, -1)) {
+        return false;
+    }
+    std::printf("Present: %s\n", fifo ? "VSync on (every frame shown for a refresh)"
+                                       : "VSync off (newest frame shown)");
+    std::fflush(stdout);
     return true;
 }
 

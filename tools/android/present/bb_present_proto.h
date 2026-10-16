@@ -9,9 +9,12 @@
  *
  *   game -> app  HELLO     version; width/height/format/count = the buffer set that follows
  *                          (generation 1); flags (BB_PRESENT_FLAG_*, in the field `index` shares):
- *                          how the app is to show the frames, for the whole connection. The app
+ *                          how the app is to show the frames at the start (MODE changes it). The app
  *                          answers HELLO (its version, flags = the ones it accepts) or closes the
  *                          socket; a version it does not speak is a close, logged on both sides.
+ *   game -> app  MODE      flags (BB_PRESENT_FLAG_*): the presentation mode from now on, see below.
+ *                          Sent when the game's effective mode changes while it runs (Lossless
+ *                          Scaling frame generation turned on or off needs FIFO); no answer.
  *   game -> app  BUFFER    generation, index, width, height, format. Followed IMMEDIATELY by the
  *                          buffer itself, one more datagram written by
  *                          AHardwareBuffer_sendHandleToUnixSocket (the receiver reads it with
@@ -44,9 +47,18 @@
  *            frame is shown for at least one refresh, in order, one per refresh. Frames that
  *            arrive meanwhile wait in the app (at most count of them); the game is held back by the
  *            missing RELEASEs. Bionic game: BB_VSYNC=1 (bbport.ini vsync=1).
- * Both modes use the same messages and the same RELEASE rules; the mode never changes in a
- * connection. Frame generation that adds frames in the app (the plan: Lossless Scaling) works on
- * what FRAME delivers in either mode; FIFO is the one with an even spacing to build on.
+ * Both modes use the same messages and the same RELEASE rules. HELLO sets the mode and MODE changes it
+ * (version 3), at a point in the stream between two FRAMEs:
+ *   FIFO -> newest wins  the newest frame waiting in the app's queue is applied at once and the older
+ *            queued frames are released unseen, each with its own acquire fence as the release fence
+ *            (the game's writes are what their buffers still wait for); later frames are applied as
+ *            they arrive.
+ *   newest wins -> FIFO  later frames queue as above; the first goes on at once.
+ * Frame generation that adds frames in the game (Lossless Scaling, libbbgpu/vk_lsfg.cpp) hands the
+ * app a burst of frames per game frame and needs FIFO for their even spacing.
+ *
+ * Version 3 added MODE. The app and the game must be the same version: HELLO with another one is
+ * refused and logged on both sides.
  */
 #ifndef BB_PRESENT_PROTO_H
 #define BB_PRESENT_PROTO_H
@@ -59,7 +71,7 @@
 #include <unistd.h>
 
 #define BB_PRESENT_MAGIC 0x52504242u /* "BBPR" */
-#define BB_PRESENT_VERSION 2u
+#define BB_PRESENT_VERSION 3u
 #define BB_PRESENT_MAX_BUFFERS 8u
 
 /* HELLO flags. */
@@ -73,6 +85,7 @@ enum bb_present_type {
     BB_PRESENT_RELEASE = 4,
     BB_PRESENT_RESET = 5,
     BB_PRESENT_BYE = 6,
+    BB_PRESENT_MODE = 7,
 };
 
 typedef struct bb_present_msg {
@@ -82,7 +95,7 @@ typedef struct bb_present_msg {
     uint32_t generation; /* buffer set, starts at 1, +1 on every RESET */
     union {
         uint32_t index; /* buffer number, < count (BUFFER, FRAME, RELEASE) */
-        uint32_t flags; /* BB_PRESENT_FLAG_* (HELLO, and the app's answer) */
+        uint32_t flags; /* BB_PRESENT_FLAG_* (HELLO, the app's answer, MODE) */
     };
     uint32_t width;      /* pixels */
     uint32_t height;

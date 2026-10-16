@@ -2,7 +2,7 @@
 // bbport: Lossless Scaling frame generation for the Bionic build (BB_LSFG_MULTIPLIER 2-4).
 //
 // The frame generation itself is liblsfg-bb.so (tools/android/lsfg, GameNative's lsfg-vk fork's
-// framegen backend; build_lsfg_android.sh), loaded with dlopen only when the multiplier is set. It
+// framegen backend; build_lsfg_android.sh), loaded with dlopen the first time frame generation turns on. It
 // runs on its own VkDevice of the same driver and physical device as the game's and exchanges images
 // with this device as AHardwareBuffers: this class owns the game's side of that hand-over.
 //
@@ -20,9 +20,10 @@
 // instead (BB_LSFG_SYNC=host forces that); if anything else fails, frame generation is off from then
 // on and the game goes on with its own frames.
 //
-// Settings (environment, from bbport.ini via run-bionic.sh): BB_LSFG_MULTIPLIER (2, 3, 4),
-// BB_LSFG_FLOW_SCALE (0.25 .. 1.0, default 0.75), BB_LSFG_PERFORMANCE (1: the light model, default),
-// BB_LSFG_DLL (the player's Lossless.dll), BB_LSFG_FORMAT (rgba16f, default, like the layer; rgba8),
+// Settings: multiplier (2, 3, 4), flow scale (0.25 .. 1.0, default 0.75) and performance (1: the light
+// model, default) come from bb_lsfg_state.h (the app's live lsfg.state file; the presenter makes a new
+// Lsfg when they change). Environment: BB_LSFG_DLL (the player's Lossless.dll, else bbport/ or shared
+// storage), BB_LSFG_FORMAT (rgba16f, default, like the layer; rgba8),
 // BB_LSFG_SYNC (fd, default; host), BB_LSFG_PACE (1, default: the presenter spaces the frames),
 // BB_LSFG_STATS (1: real/generated presents per second in the log), BB_LSFG_LIB (path of the library).
 #pragma once
@@ -31,6 +32,7 @@
 #include <array>
 #include <chrono>
 #include <memory>
+#include "bb_lsfg_state.h"
 #include "common/types.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 
@@ -51,13 +53,17 @@ public:
         vk::Fence done{};     ///< to signal with the submission that reads `image` (reset by the caller)
     };
 
-    /// Null when BB_LSFG_MULTIPLIER is not 2-4 or frame generation cannot run (one line in the log
-    /// says why; the game goes on without it).
-    static std::unique_ptr<Lsfg> Create(const Instance& instance);
+    /// Null when `state` is off or frame generation cannot run (one line in the log says why; the
+    /// game goes on without it). The framegen's flow scale, model and generated-frame count are
+    /// fixed when it starts: a change of any is a new Lsfg (destroy this one, Create another).
+    static std::unique_ptr<Lsfg> Create(const Instance& instance, const BbLsfgState::State& state);
     ~Lsfg();
 
     u32 Multiplier() const {
         return multiplier;
+    }
+    const BbLsfgState::State& Settings() const {
+        return settings;
     }
     bool Paced() const {
         return pace;
@@ -97,6 +103,7 @@ private:
     std::unique_ptr<Api> api;
     std::unique_ptr<Context> context;
     std::unique_ptr<Stats> stats;
+    BbLsfgState::State settings;
     u32 multiplier = 0;
     u32 shared_format = 0; ///< VkFormat of the shared images
     bool pace = true;
