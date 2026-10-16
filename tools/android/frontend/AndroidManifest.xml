@@ -4,7 +4,6 @@
     <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="28" />
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- The menu's "Check for updates" installs the new APK through a PackageInstaller session. -->
-    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <!-- The game folder in shared storage (targetSdk 28: file paths, as the game process reads them). -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
