@@ -2070,12 +2070,28 @@ bool BufferCache::EvictVramBlock(u64 block, bool idle) {
     const vk::DeviceMemory memory = old->memory;
     const u64 offset = (old->offset + (block - old->start)) << block_shift;
     const VAddr address = block << block_shift;
+    // bbport: the block is bound to a block of spare memory instead of being unbound. Unbinding
+    // (memory = null) on Adreno's KGSL kernel driver unbinds every whole range the block lies in
+    // (kgsl_vbo.c, kgsl_memdesc_remove_range with no child: it does not split a range, binding
+    // does): the cache binds runs of blocks as one range, so the neighbours of a returned block
+    // read the zero page while the cache thinks they are bound. On a Poco F7 Pro (Adreno 750) 5
+    // idle blocks returned at boot lost the device when the save loaded. Any driver: the block's
+    // slot is free all the same, and nothing that may still read the block faults.
+    if (!evicted_memory) {
+        auto spare = instance.GetDevice().allocateMemory(
+            {.allocationSize = block_size, .memoryTypeIndex = arena_memory_type_index});
+        if (spare.result != vk::Result::eSuccess) {
+            return false; // stays in VRAM
+        }
+        evicted_memory = spare.value;
+        BbStats::device_alloc_bytes.fetch_add(block_size, std::memory_order_relaxed);
+    }
     for (const auto& arena : arenas) {
         if (arena.cpu_addr <= address && address - arena.cpu_addr < arena.size_bytes) {
             BindsForArena(&arena)->binds.emplace_back(vk::SparseMemoryBind{
                 .resourceOffset = address - arena.cpu_addr,
                 .size = block_size,
-                .memory = {},
+                .memory = evicted_memory,
                 .memoryOffset = 0,
             });
         }
@@ -2154,7 +2170,7 @@ void BufferCache::ReturnIdleCopies(u32 now) {
     // Their entries in the BDA page table go back to 0: a shader that reaches them through a
     // pointer faults (FaultManager) and the block is bound and uploaded again, as the first time.
     // A run of blocks is one fill.
-    u64 run_start = 0, run_end = 0;
+    u64 run_start = 0, run_end = 0, returned = 0;
     const auto clear_run = [&] {
         if (run_end != run_start) {
             runtime.FillBuffer(bda_pagetable_buffer.get(), run_start * sizeof(vk::DeviceAddress),
@@ -2165,6 +2181,7 @@ void BufferCache::ReturnIdleCopies(u32 now) {
         if (!EvictVramBlock(block, true)) {
             continue;
         }
+        ++returned;
         if (block != run_end) {
             clear_run();
             run_start = block;
@@ -2172,6 +2189,13 @@ void BufferCache::ReturnIdleCopies(u32 now) {
         run_end = block + 1;
     }
     clear_run();
+    if (returned != 0) {
+        std::printf("Guest memory: %llu idle VRAM copies returned (%llu KiB, tick %llu), %llu chunks\n",
+                    (unsigned long long)returned, (unsigned long long)((returned << block_shift) >> 10),
+                    (unsigned long long)scheduler.CurrentTick(),
+                    (unsigned long long)residency_chunks.size());
+        std::fflush(stdout);
+    }
 }
 
 void BufferCache::ProcessIdleBlocks() {
