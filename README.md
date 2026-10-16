@@ -1,7 +1,7 @@
 <h1 align="center">Bloodborne-Android</h1>
 
 <p align="center">
-  <b>Bloodborne on Android.</b> Yharnam on Snapdragon phones and handhelds, and experimentally on Mali.
+  <b>Bloodborne on Android.</b> Yharnam on Snapdragon phones and handhelds, Mali is for testing only, it not run yet.
 </p>
 
 <p align="center">
