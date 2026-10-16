@@ -364,8 +364,14 @@ private:
     void ProcessIdleBlocks();
     /// A VRAM slot of a block that left it: reused by the next move to VRAM.
     void ReleaseResidencySlot(vk::DeviceMemory memory, u64 offset);
-    /// Unbinds a VRAM block of memory the game unmapped (uploaded again if mapped and used).
-    void EvictVramBlock(u64 block);
+    /// Unbinds a VRAM block of memory the game unmapped, or an idle copy (`idle`): uploaded again
+    /// if mapped and used. False when the block had no VRAM slot.
+    bool EvictVramBlock(u64 block, bool idle = false);
+    /// bbport: copy mode (not GuestInPlace): unbinds the VRAM copies not bound for
+    /// BB_VRAM_IDLE_SECONDS, and those of the emptiest chunk, without GPU-written data.
+    void ReturnIdleCopies(u32 now);
+    /// bbport: chunks without blocks for 5 s go back to the driver.
+    void FreeEmptyResidencyChunks(u32 now);
     [[nodiscard]] static u32 VramIdleSeconds();
     void DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size);
 
