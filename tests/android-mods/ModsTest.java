@@ -349,21 +349,24 @@ public final class ModsTest {
         test("memory_budget_by_ram", () -> {
             long gib = MemoryBudget.GIB_KB;
             // MemTotal as phones report it: 16 GB ~15.2 GB, 12 GB (Poco F7 Pro) 11367156 kB, 8 GB ~7.5 GB.
-            eq(4096L, MemoryBudget.forMemTotal(15_900_000).budgetMb); eq(20, MemoryBudget.forMemTotal(15_900_000).idleSeconds);
-            eq(2048L, MemoryBudget.forMemTotal(11_367_156).budgetMb); eq(10, MemoryBudget.forMemTotal(11_367_156).idleSeconds);
-            eq(1536L, MemoryBudget.forMemTotal(7_600_000).budgetMb);
-            eq(1024L, MemoryBudget.forMemTotal(5_700_000).budgetMb);
-            eq(4096L, MemoryBudget.forMemTotal(0).budgetMb); // unknown: run-bionic.sh's own
-            eq(4096L, MemoryBudget.forMemTotal(14 * gib).budgetMb); eq(2048L, MemoryBudget.forMemTotal(14 * gib - 1).budgetMb);
-            eq(2048L, MemoryBudget.forMemTotal(10 * gib).budgetMb); eq(1536L, MemoryBudget.forMemTotal(10 * gib - 1).budgetMb);
-            eq(list("BB_GC_BUDGET_MB=2048", "BB_VRAM_IDLE_SECONDS=10"), Arrays.asList(MemoryBudget.forMemTotal(11_367_156).environment()));
-            eq("Memory: 10.8 GB RAM: a 12 GB phone -> GPU memory budget 2048 MB, idle copies freed after 10 s",
-                MemoryBudget.forMemTotal(11_367_156).logLine());
+            MemoryBudget big = MemoryBudget.forMemTotal(15_900_000), twelve = MemoryBudget.forMemTotal(11_367_156);
+            eq(4096L, big.textureMb); eq(0L, big.vramMb); // as before: run-bionic.sh's and the driver's own
+            eq(list("BB_GC_BUDGET_MB=4096"), Arrays.asList(big.environment()));
+            eq(2048L, twelve.textureMb); eq(2048L, twelve.vramMb);
+            eq(list("BB_GC_BUDGET_MB=2048", "BB_VRAM_LIMIT_MB=2048"), Arrays.asList(twelve.environment()));
+            eq(1536L, MemoryBudget.forMemTotal(7_600_000).vramMb);
+            eq(1024L, MemoryBudget.forMemTotal(5_700_000).vramMb);
+            eq(0L, MemoryBudget.forMemTotal(0).vramMb); eq(4096L, MemoryBudget.forMemTotal(0).textureMb); // unknown
+            eq(0L, MemoryBudget.forMemTotal(14 * gib).vramMb); eq(2048L, MemoryBudget.forMemTotal(14 * gib - 1).vramMb);
+            eq(2048L, MemoryBudget.forMemTotal(10 * gib).vramMb); eq(1536L, MemoryBudget.forMemTotal(10 * gib - 1).vramMb);
+            eq("Memory: 10.8 GB RAM: a 12 GB phone -> textures 2048 MB, GPU memory taken as 2048 MB", twelve.logLine());
+            eq("Memory: 15.2 GB RAM: the default budget -> textures 4096 MB, GPU memory as the driver reports", big.logLine());
         });
         test("memory_budget_set_by_hand", () -> {
             MemoryBudget set = MemoryBudget.choose(11_367_156, " 3000 ");
-            eq(3000L, set.budgetMb); eq(10, set.idleSeconds); contains(set.logLine(), "10.8 GB RAM: set in bbport.ini");
-            for (String bad : new String[]{null, "", "abc", "100", "99999"}) eq(2048L, MemoryBudget.choose(11_367_156, bad).budgetMb);
+            eq(3000L, set.textureMb); eq(3000L, set.vramMb); contains(set.logLine(), "10.8 GB RAM: set in bbport.ini");
+            eq(3000L, MemoryBudget.choose(15_900_000, "3000").vramMb); // by hand on a 16 GB phone too
+            for (String bad : new String[]{null, "", "abc", "100", "99999"}) eq(2048L, MemoryBudget.choose(11_367_156, bad).vramMb);
         });
         test("memory_budget_reads_meminfo", () -> {
             eq(11367156L, MemoryBudget.memTotalKb("MemTotal:       11367156 kB\nMemFree:           18132 kB\n"));
