@@ -2053,14 +2053,14 @@ void BufferCache::ReleaseResidencySlot(vk::DeviceMemory memory, u64 offset) {
     NoteResidencyUnused();
 }
 
-void BufferCache::EvictVramBlock(u64 block) {
+bool BufferCache::EvictVramBlock(u64 block, bool idle) {
     if (non_sparse_arenas) {
-        return; // an arena's memory is its own: no block leaves it
+        return false; // an arena's memory is its own: no block leaves it
     }
     const auto old = resident_ranges.Find(block);
     if (old == resident_ranges.end() || in_place_blocks.Contains(block) ||
         !residency_chunks.contains(static_cast<VkDeviceMemory>(old->memory))) {
-        return;
+        return false;
     }
     const vk::DeviceMemory memory = old->memory;
     const u64 offset = (old->offset + (block - old->start)) << block_shift;
@@ -2082,16 +2082,108 @@ void BufferCache::EvictVramBlock(u64 block) {
     ReleaseResidencySlot(memory, offset);
     // After the work submitted so far: it may still read the block.
     bind_wait_tick = std::max(bind_wait_tick, scheduler.CurrentTick() - 1);
-    BbStats::vram_unmapped_bytes.fetch_add(block_size, std::memory_order_relaxed);
+    (idle ? BbStats::vram_idle_bytes : BbStats::vram_unmapped_bytes)
+        .fetch_add(block_size, std::memory_order_relaxed);
+    return true;
+}
+
+void BufferCache::ReturnIdleCopies(u32 now) {
+    // Data only the GPU has (in the VRAM copy) would be lost: such blocks stay.
+    const auto gpu_data = [&](u64 block) {
+        const VAddr address = block << block_shift;
+        return IsRegionGpuModified(address, block_size) ||
+               gpu_modified_ranges.Intersects(address, block_size);
+    };
+    const auto idle_for = [&](u64 block) {
+        return now - group_use[(block << block_shift) >> USE_GROUP_BITS];
+    };
+    // At most 128 MiB a second: each block is one sparse unbind.
+    const u64 max_blocks = std::max<u64>(1, 128_MB >> block_shift);
+    std::vector<u64> blocks;
+    for (const auto& range : resident_ranges) {
+        if (!residency_chunks.contains(static_cast<VkDeviceMemory>(range.memory))) {
+            continue;
+        }
+        for (u64 block = range.start; block < range.end && blocks.size() < max_blocks; ++block) {
+            if (idle_for(block) >= VramIdleSeconds() && !gpu_data(block)) {
+                blocks.push_back(block);
+            }
+        }
+    }
+    // Over 128 MiB of free slots: the copies of the emptiest chunk go too, idle or not (bound in
+    // the last 2 s: left for now), when the free slots of the others can take them; the ones
+    // bound again come back into fuller chunks (AllocateResidency), and the chunk empties. One
+    // chunk every 10 s, each once a minute at most (as ProcessIdleBlocks in place).
+    if (blocks.empty() && free_slot_count * block_size >= 128_MB && now - last_evacuation >= 10) {
+        auto sparsest = residency_chunks.end();
+        for (auto it = residency_chunks.begin(); it != residency_chunks.end(); ++it) {
+            const ResidencyChunk& chunk = it->second;
+            if (it->first == static_cast<VkDeviceMemory>(residency_memory) || chunk.used == 0 ||
+                now - chunk.evacuated_second < 60) {
+                continue;
+            }
+            if (sparsest == residency_chunks.end() || chunk.used < sparsest->second.used) {
+                sparsest = it;
+            }
+        }
+        if (sparsest != residency_chunks.end() &&
+            sparsest->second.used <=
+                (free_slot_count - sparsest->second.free_offsets.size()) * block_size) {
+            sparsest->second.evacuated_second = now;
+            last_evacuation = now;
+            BbStats::evacuations.fetch_add(1, std::memory_order_relaxed);
+            for (const auto& range : resident_ranges) {
+                if (static_cast<VkDeviceMemory>(range.memory) != sparsest->first) {
+                    continue;
+                }
+                for (u64 block = range.start; block < range.end; ++block) {
+                    if (gpu_data(block)) {
+                        BbStats::evac_kept_gpu.fetch_add(1, std::memory_order_relaxed);
+                    } else if (idle_for(block) >= 2) {
+                        blocks.push_back(block);
+                    }
+                }
+            }
+        }
+    }
+    // Their entries in the BDA page table go back to 0: a shader that reaches them through a
+    // pointer faults (FaultManager) and the block is bound and uploaded again, as the first time.
+    // A run of blocks is one fill.
+    u64 run_start = 0, run_end = 0;
+    const auto clear_run = [&] {
+        if (run_end != run_start) {
+            runtime.FillBuffer(bda_pagetable_buffer.get(), run_start * sizeof(vk::DeviceAddress),
+                               (run_end - run_start) * sizeof(vk::DeviceAddress), 0u);
+        }
+    };
+    for (const u64 block : blocks) {
+        if (!EvictVramBlock(block, true)) {
+            continue;
+        }
+        if (block != run_end) {
+            clear_run();
+            run_start = block;
+        }
+        run_end = block + 1;
+    }
+    clear_run();
 }
 
 void BufferCache::ProcessIdleBlocks() {
     const u32 now = BbStats::coarse_second.load(std::memory_order_relaxed);
-    if (now == idle_scan_second || !GuestInPlace() || VramIdleSeconds() == 0 ||
-        non_sparse_arenas) {
+    if (now == idle_scan_second || VramIdleSeconds() == 0 || non_sparse_arenas) {
         return;
     }
     idle_scan_second = now;
+    if (!GuestInPlace()) {
+        // bbport: copies of the game's memory (BB_GUEST_IN_PLACE=0, the phones): returned when
+        // idle, then their emptied chunks below. They were never returned: the chunks grew to the
+        // VRAM limit while the world was walked (2 GiB in 8 minutes of Central Yharnam on a 12 GB
+        // phone, where VRAM is the system's RAM) and Android swapped the game out.
+        ReturnIdleCopies(now);
+        FreeEmptyResidencyChunks(now);
+        return;
+    }
     if (LayerMode()) {
         LayerMaintain();
         LayerProcessIdle();
@@ -2145,6 +2237,10 @@ void BufferCache::ProcessIdleBlocks() {
             }
         }
     }
+    FreeEmptyResidencyChunks(now);
+}
+
+void BufferCache::FreeEmptyResidencyChunks(u32 now) {
     // Chunks without blocks for 5 s, the rebinds away from them long done: back to the driver.
     for (auto it = residency_chunks.begin(); it != residency_chunks.end();) {
         const ResidencyChunk& chunk = it->second;
