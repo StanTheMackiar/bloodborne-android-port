@@ -613,6 +613,9 @@ private:
     std::optional<u32> arena_fallback_type_index;
     u32 arena_memory_type_bits = 0; ///< memory types the arena's blocks can be bound to
     vk::DeviceMemory residency_memory{}; ///< bbport: the 64 MiB block arena residency comes from
+    /// bbport: one block of memory every evicted block is bound to instead of being unbound
+    /// (EvictVramBlock); allocated the first time, never freed (as residency_memory).
+    vk::DeviceMemory evicted_memory{};
     u64 residency_size = 0, residency_used = 0;
     std::future<vk::DeviceMemory> spare_residency; ///< the next block, allocated in the background
     /// bbport: VRAM blocks no longer needed. Per 2 MiB of guest addresses, the second
