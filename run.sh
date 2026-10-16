@@ -81,8 +81,11 @@ if [[ ${BB_AUTO_RENDER_RES:-} == 1 ]]; then
     unset BB_RENDER_RES BB_OUTPUT_RES BB_AUTO_RENDER_RES
 fi
 # BB_RENDER_RES=WxH explicitly sets the game's render resolution (a patch at start).
-# Frame rate: BB_FPS=uncap (default; delta-time patch, vblank 480 Hz, frames shown at once),
-# 60/90 (fixed-timestep patches) or 30 (unpatched). BB_PATCHES adds patch names ("a;b").
+# Frame rate: BB_FPS=uncap (default; hooks in the game's code, gpu/shim/bbport_frame_rate.cpp: each
+# frame's real time; vblank 480 Hz, frames shown at once; BB_FRAME_HOOKS=0: the community patches),
+# 60/90 (the same hooks, at most 60/90 frames a second) or 30 (the game's own). BB_FRAME_DT_MAX_FPS=20
+# keeps the game's speed down to 20 FPS (30, the default: it slows down below 30). BB_PATCHES adds
+# patch names ("a;b").
 fps=${BB_FPS:-uncap}
 # bbport.ini output_res other than 1080p (720p for the Steam Deck, 1440p, 2160p): the whole game
 # renders at the preset's size of the output (a patch), the upscaler fills the output, the UI is

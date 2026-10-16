@@ -34,7 +34,7 @@ The Frame generation menu writes `bbport/lsfg.state` (`multiplier=`, `flow=`, `p
 - The presentation mode is FIFO while frame generation runs or VSync is on. The game tells the app with a `BB_PRESENT_MODE` message (protocol version 3); the app, going FIFO → newest-wins, shows the newest queued frame and releases the older ones unseen with their acquire fences.
 - One log line per change: `LSFG: now x3, flow 0.75, performance 1` or `LSFG: off` (the reason follows from `LSFG: off (...)` when it cannot start: no Lossless.dll, FSR 3.1 frame generation on, ...).
 
-What cannot follow live: the game's delta-time patch for the 30 FPS limit loads with the game, so it is chosen at start from `lsfg_multiplier`. Turning Lossless Scaling on at the 30 FPS limit keeps the game's own timing until the next start; turning it off keeps the patch.
+The game's frame rate no longer depends on frame generation: hooks in the game's code (installed when it loads) give it each frame's real time at every FPS limit, 30 included, and the present thread limits the rate, so Lossless Scaling can be turned on and off live at any limit. With `BB_FRAME_HOOKS=0` (in `bionic-local.sh`) the old behaviour returns: at the 30 limit the delta-time patch loads only when frame generation is on at start.
 
 ## What the fork's patches do (tools/android/lsfg-android-patches)
 

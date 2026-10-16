@@ -68,7 +68,7 @@ final class SettingsDialog {
     private static final String[] UPSCALER_NAMES={"Off","FSR 3.1"};
     private static final int FSR3=1;
     private static final String[] FPS_VALUES={"30","40","45","60","0"};
-    private static final String[] FPS_NAMES={"30 (the game's own)","40","45","60","Unlimited"};
+    private static final String[] FPS_NAMES={"30","40","45","60","Unlimited"};
     /** Snapdragon 8 Gen 2: three Cortex-A510, four Cortex-A715, one Cortex-X3. */
     private static final String[] CORE_NAMES={"Core 0 · efficiency A510 2.0 GHz","Core 1 · efficiency A510 2.0 GHz",
         "Core 2 · efficiency A510 2.0 GHz","Core 3 · performance A715 2.8 GHz","Core 4 · performance A715 2.8 GHz",
@@ -243,8 +243,13 @@ final class SettingsDialog {
         heading(box,"FPS limit");
         final RadioGroup fpsLimit=choices(box,FPS_NAMES,indexOf(FPS_VALUES,get("fps_limit","30"),0));
         TextView fpsNote=new TextView(activity); fpsNote.setTextSize(13); fpsNote.setAlpha(0.7f);
-        fpsNote.setText("Above 30 uses the community frame-rate patch (game timing follows the real frame time).");
+        fpsNote.setText("Hooks in the game's code give it each frame's real time, so it keeps its speed at any limit.");
         box.addView(fpsNote);
+        final Switch speedFloor=toggle(box,"Keep game speed when FPS drops (down to 20 FPS)",!"30".equals(get("speed_floor","20")));
+        TextView speedNote=new TextView(activity); speedNote.setTextSize(13); speedNote.setAlpha(0.7f);
+        speedNote.setText("Below 30 FPS the game normally runs in slow motion; with this on, it keeps real time down to 20 FPS. "
+            +"Turn off if physics or animations misbehave.");
+        box.addView(speedNote);
         heading(box,"VSync");
         final Switch vsync=toggle(box,"VSync","1".equals(get("vsync","0")));
         TextView vsyncNote=new TextView(activity); vsyncNote.setTextSize(13); vsyncNote.setAlpha(0.7f);
@@ -281,6 +286,7 @@ final class SettingsDialog {
                 changed.put("upscaler",UPSCALER_VALUES[Math.max(0,checkedIndex(upscalers))]);
                 changed.put("fps_limit",FPS_VALUES[Math.max(0,checkedIndex(fpsLimit))]);
                 changed.put("frame_generation",frameGen.isChecked() && checkedIndex(upscalers)!=0 && !lossless ? "1" : "0");
+                changed.put("speed_floor",speedFloor.isChecked() ? "20" : "30");
                 changed.put("vsync",vsync.isChecked() ? "1" : "0");
                 changed.put("thor_cpus",cpuList(cores));
                 changed.put("preset",String.valueOf(Math.max(0,checkedIndex(presets))));
@@ -296,7 +302,9 @@ final class SettingsDialog {
     /** Saves the changed keys and restarts the game when any differs from the file. */
     private void apply(Map<String,String> changed) {
         boolean same=true;
-        for (Map.Entry<String,String> e:changed.entrySet()) if (!e.getValue().equals(values.get(e.getKey()))) same=false;
+        // A key an older bbport.ini lacks counts as its default (speed_floor: 20, as run-bionic.sh reads it).
+        for (Map.Entry<String,String> e:changed.entrySet())
+            if (!e.getValue().equals(values.containsKey(e.getKey()) || !e.getKey().equals("speed_floor") ? values.get(e.getKey()) : "20")) same=false;
         if (same) return;
         if (save(changed)) restart.run();
         else new AlertDialog.Builder(activity).setMessage("The settings could not be saved.").setPositiveButton("OK",null).show();

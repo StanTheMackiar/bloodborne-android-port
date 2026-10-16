@@ -107,8 +107,10 @@ def main():
         write(args.out / f'model_lod={value}.bin',
               patches.compile_patches(args.xml, [name], args.app_version, segments))
         count += 1
-    # Above 30 FPS: the delta-time patch with the sprint fix (patches.FPS_PRESETS['uncap']); the
-    # present thread then limits the rate (BB_FPS_LIMIT, run-bionic.sh).
+    # The delta-time patch with the sprint fix (patches.FPS_PRESETS['uncap']), the frame rate before the
+    # hooks (gpu/shim/bbport_frame_rate.cpp): run-bionic.sh gives it to bb-probe only as --fallback-patches
+    # (the hooks did not install) or with BB_FRAME_HOOKS=0; the present thread limits the rate
+    # (BB_FPS_LIMIT).
     write(args.out / 'fps=uncap.bin',
           patches.compile_patches(args.xml, patches.FPS_PRESETS['uncap'], args.app_version, segments))
     count += 1
