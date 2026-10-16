@@ -11,8 +11,12 @@ api=${BB_ANDROID_API:-30}
 prefix=$root/bionic-prefix src=$root/bionic-src bld=$root/bionic-build
 [[ -f $ndk/build/cmake/android.toolchain.cmake ]] || { echo "No NDK: $ndk" >&2; exit 1; }
 mkdir -p "$prefix" "$src" "$bld"
-J=${BB_JOBS:-22}
-run() { taskset -c 2-23 nice -n 19 "$@"; }
+# The NDK's prebuilt tools for this machine (linux-x86_64, or darwin-x86_64: universal, so Apple Silicon too).
+case $(uname -s) in Darwin) host_tag=darwin-x86_64 ;; *) host_tag=linux-x86_64 ;; esac
+cores=$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu)
+J=${BB_JOBS:-$cores}
+# Linux: two cores left free (the PC stays usable). macOS has no taskset.
+if command -v taskset >/dev/null; then run() { taskset -c "2-$((cores - 1))" nice -n 19 "$@"; }; else run() { nice -n 19 "$@"; }; fi
 
 fetch() { # name url archive-extension
     local dir=$src/$1
@@ -59,7 +63,7 @@ cm sdl3 "$src/SDL3-3.2.10" -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TEST_LIBRARY=O
 
 # FFmpeg (avplayer/videodec): static, PIC, no programs, only built-in codecs/demuxers.
 if [[ ! -f $prefix/.done-ffmpeg ]]; then
-    tc=$ndk/toolchains/llvm/prebuilt/linux-x86_64
+    tc=$ndk/toolchains/llvm/prebuilt/$host_tag
     mkdir -p "$bld/ffmpeg" && pushd "$bld/ffmpeg" >/dev/null
     "$src/ffmpeg-7.1.5/configure" --prefix="$prefix" --enable-cross-compile --target-os=android --arch=aarch64 \
         --cc="$tc/bin/aarch64-linux-android$api-clang" --cxx="$tc/bin/aarch64-linux-android$api-clang++" \
@@ -70,7 +74,7 @@ if [[ ! -f $prefix/.done-ffmpeg ]]; then
     run make -j"$J" >"$bld/ffmpeg.log" 2>&1 || { tail -30 "$bld/ffmpeg.log" >&2; exit 1; }
     make install >/dev/null
     # configure's Android target links libandroid/libmediandk for MediaCodec/JNI, both disabled here.
-    sed -i 's/ -landroid -lmediandk//' "$prefix"/lib/pkgconfig/libavutil.pc
+    sed -i.bak 's/ -landroid -lmediandk//' "$prefix"/lib/pkgconfig/libavutil.pc && rm "$prefix"/lib/pkgconfig/libavutil.pc.bak
     popd >/dev/null
     touch "$prefix/.done-ffmpeg"
 fi
