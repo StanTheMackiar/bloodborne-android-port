@@ -768,9 +768,79 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
         (LayerActive() ? 2 : 1);
     fault_manager = std::make_unique<FaultManager>(instance, scheduler, *this, block_shift,
                                                    blocks_per_arena_page * num_arena_pages);
+    // bbport: the page table has an entry for every block of the 40-bit address space: 512 MiB,
+    // all of it allocated and cleared, while the game's blocks fill a few MiB of it (on a 12 GB
+    // phone, where GPU memory is the system's RAM). In copy mode (the phones) with sparse
+    // residency that reads unbound memory as zero (Turnip: residencyNonResidentStrict), it is a
+    // sparse buffer instead: a page of it is bound when an entry in it is first written
+    // (EnsureBdaTablePages), and an unbound entry reads 0, "not resident", as a cleared one did.
+    // BB_SPARSE_BDA_TABLE=0: the full table as before.
+    const char* sparse_env = std::getenv("BB_SPARSE_BDA_TABLE");
+    sparse_bda_table =
+        !non_sparse_arenas && !GuestInPlace() && !LayerActive() &&
+        !(sparse_env && sparse_env[0] == '0') &&
+        instance.GetPhysicalDevice().getProperties().sparseProperties.residencyNonResidentStrict;
     bda_pagetable_buffer = std::make_unique<Buffer>(
-        instance, 0, bda_pagetable_size, MemoryType::DeviceLocal, "BDA Page Table Buffer");
-    runtime.FillBuffer(bda_pagetable_buffer.get(), 0u, bda_pagetable_size, 0u);
+        instance, 0, bda_pagetable_size,
+        sparse_bda_table ? MemoryType::Sparse : MemoryType::DeviceLocal, "BDA Page Table Buffer");
+    if (sparse_bda_table) {
+        const auto reqs =
+            instance.GetDevice().getBufferMemoryRequirements(bda_pagetable_buffer->Handle());
+        bda_table_page = std::max<u64>(reqs.alignment, 4_KB);
+        const auto& types = instance.GetMemoryProperties();
+        bda_table_type = ~0u;
+        for (u32 i = 0; i < types.memoryTypeCount; ++i) {
+            if (!((reqs.memoryTypeBits >> i) & 1)) {
+                continue;
+            }
+            if (bda_table_type == ~0u || (types.memoryTypes[i].propertyFlags &
+                                          vk::MemoryPropertyFlagBits::eDeviceLocal)) {
+                bda_table_type = i;
+                if (types.memoryTypes[i].propertyFlags & vk::MemoryPropertyFlagBits::eDeviceLocal) {
+                    break;
+                }
+            }
+        }
+        bda_table_bound.assign((bda_pagetable_size + bda_table_page - 1) / bda_table_page, 0);
+        std::printf("Buffer cache: BDA page table sparse (%llu MiB of entries, pages of %llu KiB "
+                    "bound when written; BB_SPARSE_BDA_TABLE=0: all of it)\n",
+                    (unsigned long long)(bda_pagetable_size >> 20),
+                    (unsigned long long)(bda_table_page >> 10));
+    } else {
+        runtime.FillBuffer(bda_pagetable_buffer.get(), 0u, bda_pagetable_size, 0u);
+    }
+}
+
+void BufferCache::EnsureBdaTablePages(u64 offset, u64 size) {
+    if (!sparse_bda_table || size == 0) {
+        return;
+    }
+    const u64 last = (offset + size - 1) / bda_table_page;
+    for (u64 page = offset / bda_table_page; page <= last; ++page) {
+        if (bda_table_bound[page]) {
+            continue;
+        }
+        const auto memory = Vulkan::Check(instance.GetDevice().allocateMemory(
+            {.allocationSize = bda_table_page, .memoryTypeIndex = bda_table_type}));
+        BbStats::device_alloc_bytes.fetch_add(bda_table_page, std::memory_order_relaxed);
+        // Bound before this submission runs (SubmitPendingArenaBinds), then cleared: new
+        // memory holds whatever it held. The entries' copy is recorded after the clear.
+        BindsForArena(bda_pagetable_buffer.get())
+            ->binds.emplace_back(vk::SparseMemoryBind{
+                .resourceOffset = page * bda_table_page,
+                .size = bda_table_page,
+                .memory = memory,
+                .memoryOffset = 0,
+            });
+        runtime.FillBuffer(bda_pagetable_buffer.get(), page * bda_table_page, bda_table_page, 0u);
+        bda_table_bound[page] = 1;
+        ++bda_table_pages;
+        if ((bda_table_pages & (bda_table_pages - 1)) == 0) {
+            std::printf("Buffer cache: BDA page table: %llu pages bound (%llu KiB)\n",
+                        (unsigned long long)bda_table_pages,
+                        (unsigned long long)((bda_table_pages * bda_table_page) >> 10));
+        }
+    }
 }
 
 BufferCache::~BufferCache() = default;
@@ -1814,6 +1884,9 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
     }
 
     staging.Flush();
+    for (const auto& copy : copies) {
+        EnsureBdaTablePages(copy.dstOffset, copy.size);
+    }
     runtime.CopyBuffer(staging.buffer, bda_pagetable_buffer.get(), copies);
 }
 

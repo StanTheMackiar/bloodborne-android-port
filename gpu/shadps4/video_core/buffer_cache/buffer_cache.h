@@ -476,6 +476,15 @@ private:
 
     std::unique_ptr<FaultManager> fault_manager;
     std::unique_ptr<Buffer> bda_pagetable_buffer;
+    /// bbport: the page table as a sparse buffer, its pages bound when first written (copy mode
+    /// with strict non-resident reads; see the constructor).
+    bool sparse_bda_table = false;
+    u64 bda_table_page = 0;
+    u32 bda_table_type = 0;
+    u64 bda_table_pages = 0;
+    std::vector<u8> bda_table_bound;
+    /// Binds (and clears) the pages of the sparse page table holding [offset, offset + size).
+    void EnsureBdaTablePages(u64 offset, u64 size);
 
     std::vector<const Buffer*> address_space; ///< num_arena_pages entries
     std::deque<Buffer> arenas;
