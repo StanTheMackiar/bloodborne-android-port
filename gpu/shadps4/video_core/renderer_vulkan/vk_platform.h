@@ -4,6 +4,7 @@
 #pragma once
 
 #include <fmt/format.h>
+#include <source_location>
 
 #include "common/assert.h"
 #include "common/logging/log.h"
@@ -21,7 +22,9 @@ namespace Vulkan {
 
 constexpr u32 TargetVulkanApiVersion = VK_API_VERSION_1_3;
 
+#ifndef __ANDROID__ // Bionic has no surface: vk_swapchain_ahb.h
 vk::SurfaceKHR CreateSurface(vk::Instance instance, const Frontend::WindowSDL& emu_window);
+#endif
 
 vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool enable_validation,
                                   bool enable_crash_diagnostic);
@@ -52,28 +55,32 @@ void SetObjectName(vk::Device device, const HandleType& handle, const char* form
 }
 
 template <StringLiteral msg = "">
-static void Check(vk::Result r) {
+static void Check(vk::Result r, std::source_location loc = std::source_location::current()) {
     if (r == vk::Result::eErrorDeviceLost) {
         Breadcrumbs::ReportDeviceLost("a Vulkan call");
     }
     if constexpr (msg.len <= 1) {
-        ASSERT_MSG(r == vk::Result::eSuccess, "vk::Result={}", vk::to_string(r));
+        ASSERT_MSG(r == vk::Result::eSuccess, "vk::Result={} at {}:{} ({})", vk::to_string(r),
+                   loc.file_name(), loc.line(), loc.function_name());
     } else {
-        ASSERT_MSG(r == vk::Result::eSuccess, "Failed to {}: vk::Result={}", msg.value,
-                   vk::to_string(r));
+        ASSERT_MSG(r == vk::Result::eSuccess, "Failed to {}: vk::Result={} at {}:{} ({})",
+                   msg.value, vk::to_string(r), loc.file_name(), loc.line(),
+                   loc.function_name());
     }
 }
 
 template <StringLiteral msg = "", typename T>
-static T Check(vk::ResultValue<T> r) {
+static T Check(vk::ResultValue<T> r, std::source_location loc = std::source_location::current()) {
     if (r.result == vk::Result::eErrorDeviceLost) {
         Breadcrumbs::ReportDeviceLost("a Vulkan call");
     }
     if constexpr (msg.len <= 1) {
-        ASSERT_MSG(r.result == vk::Result::eSuccess, "vk::Result={}", vk::to_string(r.result));
+        ASSERT_MSG(r.result == vk::Result::eSuccess, "vk::Result={} at {}:{} ({})",
+                   vk::to_string(r.result), loc.file_name(), loc.line(), loc.function_name());
     } else {
-        ASSERT_MSG(r.result == vk::Result::eSuccess, "Failed to {}: vk::Result={}", msg.value,
-                   vk::to_string(r.result));
+        ASSERT_MSG(r.result == vk::Result::eSuccess, "Failed to {}: vk::Result={} at {}:{} ({})",
+                   msg.value, vk::to_string(r.result), loc.file_name(), loc.line(),
+                   loc.function_name());
     }
     return std::move(r.value);
 }

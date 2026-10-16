@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Run the production TAA shader on synthetic inputs, including undefined/invalid history.
+#include "vk_driver_loader.h"
 #include <cassert>
 #include <algorithm>
 #include <array>
@@ -19,9 +20,8 @@
 int main(int argc, char** argv) {
     using namespace Vulkan;
     Instance instance(0, false);
-    static vk::detail::DynamicLoader loader;
     vk::detail::DispatchLoaderDynamic d;
-    d.init(loader.getProcAddress<PFN_vkGetInstanceProcAddr>("vkGetInstanceProcAddr"));
+    d.init(reinterpret_cast<PFN_vkGetInstanceProcAddr>(bb_vk_get_instance_proc_addr()));
     d.init(instance.GetInstance()); d.init(instance.GetDevice());
     const auto device = instance.GetDevice();
     Scheduler scheduler(instance);

@@ -14,7 +14,7 @@
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 9u; // layer page-table pairs / guarded write-through stores
+static constexpr u32 ShaderBinaryVersion = 10u; // rect/quad list vertex shaders: gl_PerVertex block
 static constexpr u32 ShaderMetaVersion = 7u; // bbport: ImageResource::needs_native
 static constexpr u32 PipelineKeyVersion = 5u; // bbport: Info layout (ImageResource::needs_native)
 } // namespace Serialization
@@ -295,6 +295,8 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
         if (result != vk::Result::eSuccess) {
             throw Serialization::CorruptData{"cached SPIR-V rejected by the driver"};
         }
+        Vulkan::RegisterModuleSpirv(created, spv,
+                                    fmt::format("cached shader {:#x} perm {}", program->info.pgm_hash, perm_idx));
         return created;
     };
 

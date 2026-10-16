@@ -12,6 +12,9 @@
 #include "video_core/renderer_vulkan/host_passes/fsr_pass.h"
 #include "video_core/renderer_vulkan/host_passes/pp_pass.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#ifdef __ANDROID__
+#include "video_core/renderer_vulkan/vk_lsfg.h"
+#endif
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
@@ -112,6 +115,40 @@ public:
     }
 
 private:
+    /// What a presentation submission blits into the swapchain image: a game frame (`frame`: waits
+    /// for its rendering, signals its present_done), or a generated frame (`external`: an
+    /// AHardwareBuffer image of the frame generation's device, taken over from the queue family
+    /// EXTERNAL; `wait` is complete when it is signaled, `done` is signaled when it was read).
+    struct PresentSource {
+        vk::Image image;
+        u32 width;
+        u32 height;
+        Frame* frame{};
+        bool external{};
+        vk::Semaphore wait{};
+        vk::Fence done{};
+    };
+    /// Acquires a swapchain buffer (it becomes the current one), records the blit of the source into
+    /// it plus the overlay and queues it; false when there is no buffer (the frame is skipped).
+    bool SubmitToSwapchain(const PresentSource& source);
+    /// Hands the current swapchain buffer to the app.
+    bool SendToApp();
+#ifdef __ANDROID__
+    /// Lossless Scaling frame generation for one real frame: queues it and its generated frames and
+    /// hands them to the app in order, spaced. False: not done (frame generation failed), present
+    /// the frame as usual.
+    bool PresentWithLsfg(Frame* frame);
+    /// Follows the app's live Lossless Scaling settings (bb_lsfg_state.h): called at the start of
+    /// every present, between two frames, it looks at the state file at most every 250 ms and applies
+    /// a change there and then (ApplyLsfgState).
+    void PollLsfgState();
+    /// Turns frame generation on, off or to other settings: a new Lsfg (the framegen's flow scale,
+    /// model and generated-frame count are fixed when it starts), then the swapchain buffers and the
+    /// app's presentation mode to match (ApplyLsfgOutputMode).
+    void ApplyLsfgState(const BbLsfgState::State& next);
+    /// Tells the swapchain the multiplier that runs now (0: none): the buffer count and FIFO follow.
+    void ApplyLsfgOutputMode();
+#endif
     Frame* GetRenderFrame();
 
     void RecreateFrame(Frame* frame, u32 width, u32 height);
@@ -136,6 +173,13 @@ private:
     Frame* generated_frame = nullptr; ///< bbport: TakeGeneratedFrame
     Scheduler present_scheduler;
     Scheduler flip_scheduler;
+#ifdef __ANDROID__
+    // bbport: Lossless Scaling frame generation. Declared before the swapchain: the multiplier that
+    // runs at start sets its first buffer count and presentation mode.
+    BbLsfgState::State lsfg_requested; ///< what the state file last asked for
+    BbLsfgState::Watcher lsfg_watch;
+    std::unique_ptr<Lsfg> lsfg; ///< null: off, or it could not start / failed
+#endif
     Swapchain swapchain;
     Runtime runtime;
     std::unique_ptr<Rasterizer> rasterizer;

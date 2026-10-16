@@ -25,11 +25,32 @@
 #include <ucontext.h>
 #include <fcntl.h>
 #include <dlfcn.h>
+#ifdef __ANDROID__
+#include <unwind.h> /* Bionic has no backtrace() */
+#else
 #include <execinfo.h>
+#endif
 #include <pthread.h>
 #include <time.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
+#endif
+
+#if defined(__ANDROID__) && !defined(_WIN32)
+typedef struct { void **frames; int count, max; } UnwindState;
+static _Unwind_Reason_Code unwind_step(struct _Unwind_Context *context, void *argument) {
+    UnwindState *state = argument;
+    uintptr_t pc = _Unwind_GetIP(context);
+    if (!pc) return _URC_END_OF_STACK;
+    if (state->count >= state->max) return _URC_END_OF_STACK;
+    state->frames[state->count++] = (void *)pc;
+    return _URC_NO_REASON;
+}
+static int backtrace(void **frames, int max) {
+    UnwindState state = {frames, 0, max};
+    _Unwind_Backtrace(unwind_step, &state);
+    return state.count;
+}
 #endif
 
 typedef struct { uint64_t address, size, flags; } Segment;
@@ -180,6 +201,18 @@ static void fault(int sig, siginfo_t *info, void *context) {
         snprintf(line, sizeof(line), "  called by the game at guest offset 0x%lx\n", (unsigned long)(regs.rip - (uintptr_t)image));
         ssize_t written_=write(2, line, strlen(line)); (void)written_;
     }
+#if defined(__aarch64__) && defined(__linux__)
+    /* A host fault: the caller (link register) locates a call through a null pointer. */
+    if (in_guest != GUEST_CPU_IN_GUEST) {
+        const uintptr_t lr = (uintptr_t)((ucontext_t *)context)->uc_mcontext.regs[30];
+        if (dladdr((void *)lr, &where) && where.dli_fname)
+            snprintf(line, sizeof(line), "  return address %s+0x%lx (%s)\n", where.dli_fname,
+                     (unsigned long)(lr - (uintptr_t)where.dli_fbase), where.dli_sname ? where.dli_sname : "?");
+        else
+            snprintf(line, sizeof(line), "  return address %p\n", (void *)lr);
+        ssize_t written_=write(2, line, strlen(line)); (void)written_;
+    }
+#endif
     if (gpu_enabled) bbgpu_dump_guest_writes(context);
     /* Outside the image and any shared object (generated code, a freed mapping): the mapping
      * from /proc/self/maps, and the thread. */
@@ -391,8 +424,17 @@ void runtime_restart(void) {
     runtime_restarting = 1;
     __sync_synchronize();
 #ifndef _WIN32
+#ifdef __ANDROID__
+    /* Android's app seccomp filter may kill close_range (SIGSYS): close the fds one by one. */
+    { long max = sysconf(_SC_OPEN_MAX); if (max < 0 || max > 65536) max = 65536; for (int fd = 3; fd < max; ++fd) close(fd); }
+#else
     syscall(SYS_close_range, 3u, ~0u, 0u);
+#endif
+#ifdef __ANDROID__
+    execl("/system/bin/sh", "sh", "run.sh", (char *)NULL); /* TODO(phase2): the app restarts the process */
+#else
     execlp("bash", "bash", "run.sh", (char *)NULL);
+#endif
     perror("runtime_restart: exec");
     _exit(1);
 #endif
@@ -403,8 +445,15 @@ int main(int argc, char **argv) {
 #ifndef _WIN32
     /* Keep host heap objects handed to the guest (thread handles, TLS) in the
        non-PIE brk heap, i.e. below 1 TiB: the guest packs pointers into 40 bits. */
+#ifdef __ANDROID__
+    /* Bionic (Scudo) has neither knob and no brk heap. TODO(phase2): host objects the guest keeps
+     * pointers to must come from low memory (runtime_low_map) when the kernel's VA is above 40
+     * bits; heap pointer tagging (top byte) would also break the guest's 40-bit packing. */
+    mallopt(M_BIONIC_SET_HEAP_TAGGING_LEVEL,M_HEAP_TAGGING_LEVEL_NONE);
+#else
     mallopt(M_ARENA_MAX,1);
     mallopt(M_MMAP_THRESHOLD,32*1024*1024);
+#endif
     guest_cpu_init(runtime_low_map);
 #endif
     if (argc == 2 && !strcmp(argv[1], "--vulkan-only")) return vulkan_smoke();

@@ -88,13 +88,7 @@ GpuTimestamps::GpuTimestamps(const Instance& instance_, Scheduler& scheduler_,
         .pPushConstantRanges = &range,
     }));
     const auto module = CompileSPV(GPU_TIMESTAMP_COMP, device);
-    pipeline = Check(device.createComputePipelineUnique(
-        {}, vk::ComputePipelineCreateInfo{
-                .stage = {.stage = vk::ShaderStageFlagBits::eCompute,
-                          .module = module,
-                          .pName = "main"},
-                .layout = *pipeline_layout,
-            }));
+    pipeline = CreateComputePipeline(device, module, *pipeline_layout);
     device.destroyShaderModule(module);
 }
 

@@ -19,19 +19,22 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
-/** The Turnip driver builds published as GitHub releases of this app (tag turnip-*), and their download.
- *  A release can hold several builds: each Turnip-<variant>-<version>-<sha>.zip asset is its own entry
+/** The Android driver builds published as GitHub releases of this app (tags turnip-android-* for Turnip, for
+ *  Adreno, and panvk-android-* for PanVK, for Mali), and their download. Linux (glibc) Turnip releases (other
+ *  turnip-* tags) are not listed: the game runs as an Android process.
+ *  A release can hold several builds, each driver zip asset is its own entry: Turnip-android-<variant>-<version>-<sha>.zip,
+ *  Turnip_<name>.zip (a mirrored build of someone else's, such as Turnip_Gen8_V37.zip) and PanVK-*.zip
  *  (patches-*.tar.gz and other assets are ignored). The app's own releases (android-*) are in the same
- *  list, so the releases are listed and filtered by tag; /latest would only find the app. The 5 newest
+ *  list, so the releases are listed and filtered by tag; /latest would only find the app. The 10 newest
  *  builds (by the date of their asset) are kept. The last answer is cached in files/drivers/.catalog.json with its ETag: the list shows at
  *  once, and a "not modified" answer does not count against GitHub's 60 requests an hour. */
 final class DriverCatalog {
     private static final String API="https://api.github.com/repos/ducvd89/Bloodborne-Android/releases?per_page=50";
     /** Only assets of this repository's releases are downloaded, whatever the list says. */
     private static final String DOWNLOADS="https://github.com/ducvd89/Bloodborne-Android/releases/download/";
-    private static final int LIMIT=5;
+    private static final int LIMIT=10;
     /** Version of the cache file's layout; a cache without it (or with another number) is ignored. */
-    private static final int CACHE_VERSION=2;
+    private static final int CACHE_VERSION=3;
 
     /** One downloadable driver build. published is GitHub's ISO time of the asset (sorts as text). */
     static final class Entry {
@@ -43,8 +46,10 @@ final class DriverCatalog {
         }
         /** The GPUs the build is for. */
         String gpu() { return gpuName(variant); }
-        /** The GPU family ("main" or "gen8") the variant belongs to. */
+        /** The GPU family ("main", "gen8" or "mali") the variant belongs to. */
         String family() { return DriverCatalog.family(variant); }
+        /** The lowest Android API the build runs on (its meta.json minApi). */
+        int minApi() { return DriverCatalog.minApiOf(asset); }
         /** The publishing day, like "13 Oct 2026" (or "" when GitHub gave none). */
         String date() {
             try {
@@ -70,7 +75,14 @@ final class DriverCatalog {
     }
 
     private final File cache;
-    DriverCatalog(File files) { cache=new File(new File(files,"drivers"),".catalog.json"); }
+    /** files: the app's files directory. */
+    DriverCatalog(File files) { cache=new File(new File(files,"drivers"),".catalog-android.json"); }
+    /** Whether a release tag is one of the Android driver builds: turnip-android-* or panvk-android-*. */
+    static boolean tagMatches(String tag) { return tag.startsWith("turnip-android-") || tag.startsWith("panvk-android-"); }
+    /** Whether a release asset is a driver zip: Turnip-*.zip, Turnip_*.zip or PanVK-*.zip. */
+    static boolean assetMatches(String name) {
+        return name.endsWith(".zip") && (name.startsWith("Turnip-") || name.startsWith("Turnip_") || name.startsWith("PanVK-"));
+    }
 
     /** The GPU family of a variant: "gen8v37" and "gen8" are both "gen8" (Adreno 8xx). Null stays null. */
     static String family(String variant) {
@@ -78,29 +90,49 @@ final class DriverCatalog {
     }
     static String gpuName(String variant) {
         String family=family(variant);
-        return "main".equals(family) ? "Adreno 6xx/7xx" : "gen8".equals(family) ? "Adreno 8xx" : variant;
+        return "main".equals(family) ? "Adreno 6xx/7xx" : "gen8".equals(family) ? "Adreno 8xx" : "mali".equals(family) ? "Mali" : variant;
     }
-    /** The variant in an asset name: the token after "Turnip-" up to the next "-" ("" when there is none). */
+    /** The asset's name without the maker's prefix: "Turnip-android-main-26.3.0-35b085c.zip" is "main-26.3.0-35b085c",
+     *  "Turnip_Gen8_V37.zip" is "Gen8_V37", "PanVK-android-v3.2-universal-2a9358a.zip" is "v3.2-universal-2a9358a". */
+    private static String rest(String asset) {
+        String rest=asset.endsWith(".zip") ? asset.substring(0,asset.length()-4) : asset;
+        int cut=rest.startsWith("Turnip") ? 7 : rest.startsWith("PanVK") ? 6 : 0;
+        rest=rest.substring(Math.min(cut,rest.length()));
+        return rest.startsWith("android-") ? rest.substring(8) : rest;
+    }
+    /** The GPU variant of an asset: "main" or "gen8" for Turnip-android-<variant>-..., "gen8" for Turnip_Gen8_V37.zip
+     *  (the token after the prefix, lower case), "mali" for PanVK-*.zip. "" when there is none. */
     static String variantOf(String asset) {
-        String rest=asset.substring(Math.min(7,asset.length()));
-        int dash=rest.indexOf('-');
-        if (dash<0 && rest.endsWith(".zip")) dash=rest.length()-4;
-        return dash>0 ? rest.substring(0,dash) : "";
+        if (asset.startsWith("PanVK")) return "mali";
+        String rest=rest(asset);
+        int end=0;
+        while (end<rest.length() && rest.charAt(end)!='-' && rest.charAt(end)!='_') ++end;
+        return rest.substring(0,end).toLowerCase(Locale.ROOT);
     }
-    /** A readable title from an asset name: Turnip-gen8v37-26.3.0-1dee441.zip is "Turnip gen8 V37 recipe 26.3.0 (1dee441)". */
+    /** The lowest Android API of a build: PanVK (Mali, kbase) needs 35, the Turnip for Android builds 30, a mirrored
+     *  Turnip_ build 28 (the values of their meta.json). */
+    static int minApiOf(String asset) {
+        return asset.startsWith("PanVK") ? 35 : asset.startsWith("Turnip-") ? 30 : 28;
+    }
+    /** A readable title: "Turnip 26.3.0 main (35b085c) - Adreno 6xx/7xx" for Turnip-android-main-26.3.0-35b085c.zip,
+     *  "Turnip Gen8 V37 (StevenMXZ) - Adreno 8xx" for Turnip_Gen8_V37.zip, "PanVK V3.2 (Mali)" for PanVK-android-v3.2-universal-*.zip. */
     static String titleOf(String asset) {
-        String variant=variantOf(asset);
-        String rest=asset.substring(Math.min(7,asset.length()));
-        if (rest.endsWith(".zip")) rest=rest.substring(0,rest.length()-4);
+        String variant=variantOf(asset), rest=rest(asset);
+        if (variant.equals("mali")) {
+            String version=rest.contains("-") ? rest.substring(0,rest.indexOf('-')) : rest;
+            return version.matches("[vV][0-9][0-9.]*") ? "PanVK V"+version.substring(1)+" (Mali)" : "PanVK (Mali)";
+        }
+        String where=" - "+gpuName(variant);
+        if (asset.startsWith("Turnip_")) return "Turnip "+rest.replace('_',' ')+" (StevenMXZ)"+where;
         rest=rest.length()>variant.length() ? rest.substring(variant.length()+1) : "";
-        String name=variant;
-        if (variant.startsWith("gen8") && variant.length()>4) name="gen8 "+variant.substring(4).toUpperCase(Locale.ROOT)+" recipe";
+        String name=variant.startsWith("gen8") && variant.length()>4 ? "gen8 "+variant.substring(4).toUpperCase(Locale.ROOT) : variant;
         int dash=rest.lastIndexOf('-');
         String version=dash>0 ? rest.substring(0,dash) : rest, sha=dash>0 ? rest.substring(dash+1) : "";
-        StringBuilder title=new StringBuilder("Turnip ").append(name);
+        StringBuilder title=new StringBuilder("Turnip");
         if (!version.isEmpty()) title.append(' ').append(version);
+        title.append(' ').append(name);
         if (!sha.isEmpty()) title.append(" (").append(sha).append(')');
-        return title.toString();
+        return title.append(where).toString();
     }
     static String day(long millis) {
         java.text.SimpleDateFormat out=new java.text.SimpleDateFormat("d MMM yyyy",Locale.ENGLISH);
@@ -108,8 +140,8 @@ final class DriverCatalog {
     }
     static String megabytes(long bytes) { return String.format(Locale.ROOT,"%.1f MB",bytes/1048576.0); }
 
-    /** The driver builds in a GitHub releases answer: every Turnip-*.zip asset of every turnip-* release is
-     *  an entry. Drafts skipped; newest asset first, at most 5. */
+    /** The driver builds in a GitHub releases answer: every driver zip asset (assetMatches) of every turnip-android-*
+     *  and panvk-android-* release is an entry. Drafts skipped; newest asset first, at most 10. */
     static List<Entry> parse(String json) throws JSONException {
         JSONArray releases=new JSONArray(json);
         List<Entry> out=new ArrayList<>();
@@ -117,7 +149,7 @@ final class DriverCatalog {
             JSONObject release=releases.optJSONObject(i);
             if (release==null || release.optBoolean("draft")) continue;
             String tag=text(release,"tag_name");
-            if (!tag.startsWith("turnip-")) continue;
+            if (!tagMatches(tag)) continue;
             String published=text(release,"published_at");
             JSONArray assets=release.optJSONArray("assets");
             for (int j=0; assets!=null && j<assets.length(); ++j) {
@@ -125,7 +157,7 @@ final class DriverCatalog {
                 if (asset==null) continue;
                 String name=text(asset,"name"), url=text(asset,"browser_download_url"), digest=text(asset,"digest");
                 long size=asset.optLong("size");
-                if (!name.startsWith("Turnip-") || !name.endsWith(".zip") || size<=0 || !url.startsWith(DOWNLOADS)) continue;
+                if (!assetMatches(name) || size<=0 || !url.startsWith(DOWNLOADS)) continue;
                 String variant=variantOf(name);
                 if (variant.isEmpty()) continue;
                 // An asset added later to an older release is newer than the release.

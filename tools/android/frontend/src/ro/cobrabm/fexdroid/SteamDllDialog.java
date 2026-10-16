@@ -63,7 +63,7 @@ import kotlinx.coroutines.Dispatchers;
 import kotlinx.coroutines.future.FutureKt;
 
 /** Downloads Lossless.dll from the player's own Lossless Scaling (Steam app 993090), which Lossless
- *  Scaling frame generation needs (run-thor.sh looks for it in bbport/). The player signs in with a
+ *  Scaling frame generation needs (run-bionic.sh looks for it in bbport/). The player signs in with a
  *  QR code scanned in the Steam mobile app, or with name, password and Steam Guard code; then only
  *  that one file is downloaded from the app's Windows depot and checked against the manifest's
  *  SHA-1. Steam grants the depot key only to owners. Nothing else is kept: no password, no sign-in
@@ -73,6 +73,8 @@ final class SteamDllDialog implements IAuthenticator {
     private static final long TIMEOUT=60;
     private final Activity activity;
     private final File target;
+    /** Runs on the main thread when the dialog is closed (the settings screen shows the new state). */
+    private final Runnable onClosed;
     private final Handler main=new Handler(Looper.getMainLooper());
     private final CompletableFuture<AuthPollResult> auth=new CompletableFuture<>();
     private AlertDialog dialog;
@@ -83,7 +85,9 @@ final class SteamDllDialog implements IAuthenticator {
     private volatile SteamClient client;
     private volatile boolean finished;
 
-    SteamDllDialog(Activity activity,File target) { this.activity=activity; this.target=target; }
+    SteamDllDialog(Activity activity,File target,Runnable onClosed) {
+        this.activity=activity; this.target=target; this.onClosed=onClosed;
+    }
 
     private int dp(float n) { return Math.round(n*activity.getResources().getDisplayMetrics().density); }
 
@@ -132,13 +136,13 @@ final class SteamDllDialog implements IAuthenticator {
         ScrollView scroll=new ScrollView(activity); scroll.addView(box);
         dialog=new AlertDialog.Builder(activity).setTitle("Get Lossless.dll from Steam").setView(scroll)
             .setNegativeButton("Close",null).create();
-        dialog.setOnDismissListener(d -> cancel());
+        dialog.setOnDismissListener(d -> { cancel(); if (onClosed!=null) onClosed.run(); });
         dialog.show();
         new Thread(this::run,"Steam-Lossless").start();
     }
 
     private void status(String text) {
-        android.util.Log.i("Bloodborne","Steam: "+(text.startsWith("Signed in as ") ? "signed in" : text)); // no account name
+        android.util.Log.i("Bloodborne","Steam: "+(text.startsWith("Signed in as ") ? "signed in" : safe(text))); // no account name
         main.post(() -> status.setText(text));
     }
     private void cancel() {
@@ -192,9 +196,9 @@ final class SteamDllDialog implements IAuthenticator {
 
             download(steam,scope);
             finished=true;
-            status("Lossless.dll is ready. Turn on Lossless Scaling in the menu; it applies when the game restarts.");
+            status("Lossless.dll is ready. Turn on Lossless Scaling in Frame generation (menu); it applies at once.");
         } catch (Throwable e) {
-            android.util.Log.w("Bloodborne","Steam: Lossless.dll download failed",e);
+            android.util.Log.w("Bloodborne","Steam: Lossless.dll download failed: "+safe(message(e))); // no stack: it can quote request URLs
             if (!finished) status(message(e));
         } finally {
             finished=true;
@@ -271,7 +275,7 @@ final class SteamDllDialog implements IAuthenticator {
                         return;
                     } catch (CancellationException e) { throw e;
                     } catch (Exception e) {
-                        android.util.Log.w("Bloodborne","Steam: content server "+server.getHost()+" failed",e);
+                        android.util.Log.w("Bloodborne","Steam: content server "+server.getHost()+" failed: "+safe(message(e)));
                         last=e; // the next content server
                     }
                 }
@@ -338,6 +342,9 @@ final class SteamDllDialog implements IAuthenticator {
         } catch (Exception e) { status("Could not show the QR code: "+e.getMessage()); }
     }
 
+    /** A log line without web addresses (a failed request can quote its URL, which can carry an access token): the
+     *  logs go into the problem report. */
+    private static String safe(String text) { return text.replaceAll("(?i)[a-z][a-z0-9+.-]*://\\S+","<url>"); }
     private static String message(Throwable e) {
         while ((e instanceof ExecutionException || e instanceof java.util.concurrent.CompletionException) && e.getCause()!=null)
             e=e.getCause();

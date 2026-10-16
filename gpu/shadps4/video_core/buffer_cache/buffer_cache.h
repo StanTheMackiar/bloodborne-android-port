@@ -66,9 +66,11 @@ public:
 
 class BufferCache {
     static constexpr u64 ADDRESS_SPACE_BITS = 40;
-    static constexpr u64 ARENA_PAGE_BITS = 32;
-    static constexpr u64 ARENA_PAGE_SIZE = u64{1} << ARENA_PAGE_BITS;
-    static constexpr u64 NUM_ARENA_PAGES = u64{1} << (ADDRESS_SPACE_BITS - ARENA_PAGE_BITS);
+    /// bbport: the arena page (VA granule of one sparse arena buffer) is chosen at construction:
+    /// 4 GiB where the driver takes arenas of twice that (a request spanning two pages makes one
+    /// arena of two pages), smaller on drivers that refuse huge sparse buffers (Adreno stock).
+    static constexpr u64 MAX_ARENA_PAGE_BITS = 32;
+    static constexpr u64 MIN_ARENA_PAGE_BITS = 27; ///< 128 MiB
     static constexpr u64 MIN_BLOCK_SIZE = 16_KB;
 
 public:
@@ -253,6 +255,8 @@ private:
     };
 
     ArenaBinds* BindsForArena(const Buffer* arena) {
+        // Arenas without sparse binding own their memory: nothing is ever (un)bound.
+        ASSERT_MSG(!non_sparse_arenas, "Sparse bind of an arena that owns its memory");
         auto it = std::ranges::find(pending_binds, arena, &ArenaBinds::arena);
         if (it != pending_binds.end()) {
             return std::addressof(*it);
@@ -261,6 +265,10 @@ private:
     }
 
     const Buffer* GetArena(u64 first_block, u64 last_block);
+    /// bbport, non_sparse_arenas: the blocks resident in the arenas that `merged` (covering blocks
+    /// [base_block, end_block)) replaces are copied into it on the GPU, in stream order, and their
+    /// residency and BDA page table entries point to it. Before address_space changes.
+    void MigrateBackedArenas(const Buffer* merged, u64 base_block, u64 end_block);
 
     /// `in_place`: bind what can be in place even when Garlic (texture data, read once into an
     /// image: a VRAM copy of it would only cost an upload).
@@ -467,7 +475,7 @@ private:
     std::unique_ptr<FaultManager> fault_manager;
     std::unique_ptr<Buffer> bda_pagetable_buffer;
 
-    std::array<const Buffer*, NUM_ARENA_PAGES> address_space{};
+    std::vector<const Buffer*> address_space; ///< num_arena_pages entries
     std::deque<Buffer> arenas;
     std::vector<ArenaBinds> pending_binds;
     std::mutex preupload_mutex;               ///< the map hooks come from guest threads
@@ -590,6 +598,10 @@ private:
     u64 bind_wait_tick = 0;                            ///< the next arena binds wait for it
     std::array<std::unique_ptr<Buffer>, 256> chunk_buffers{}; ///< per guest memory chunk (Chunk::index)
 
+    /// bbport: arenas are plain buffers that own their memory, allocated when created
+    /// (NonSparseArenas): no vkQueueBindSparse, residency of a block is its place in the arena's
+    /// memory, nothing is evicted, demoted or promoted. Set at construction.
+    bool non_sparse_arenas = false;
     u32 arena_memory_type_index{};
     /// bbport: system memory for residency when VRAM is full (4 GB cards), if sparse binding takes it
     std::optional<u32> arena_fallback_type_index;
@@ -620,6 +632,10 @@ private:
     u32 last_evacuation = 0; ///< ProcessIdleBlocks: when a chunk was last emptied
     u32 block_size{};
     u32 block_shift{};
+    u32 arena_page_bits{MAX_ARENA_PAGE_BITS};
+    u64 arena_page_size{u64{1} << MAX_ARENA_PAGE_BITS};
+    u64 num_arena_pages{};
+    u64 max_arena_bytes{}; ///< the largest sparse buffer the driver was seen to create
     u32 blocks_per_arena_page{};
     u32 blocks_per_arena_page_shift{};
 };

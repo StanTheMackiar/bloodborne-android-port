@@ -196,7 +196,17 @@ GraphicsPipeline::GraphicsPipeline(
         const auto type = is_quad_list ? AuxShaderType::QuadListTCS : AuxShaderType::RectListTCS;
         if (!preloading) {
             const auto& fs_info = runtime_infos[u32(Shader::SwStage::Fragment)].hw.fs;
-            sdata.tcs = Shader::Backend::SPIRV::EmitAuxilaryTessShader(type, fs_info);
+            // The parameters the vertex shader writes: the control shader may read no others.
+            u32 vs_param_mask = ~0U;
+            if (const auto* vs_info = infos[u32(Shader::SwStage::Vertex)]) {
+                vs_param_mask = 0;
+                for (u32 i = 0; i < Shader::IR::NumParams; ++i) {
+                    if (vs_info->stores.GetAny(Shader::IR::Attribute::Param0 + i)) {
+                        vs_param_mask |= 1U << i;
+                    }
+                }
+            }
+            sdata.tcs = Shader::Backend::SPIRV::EmitAuxilaryTessShader(type, fs_info, vs_param_mask);
         }
         shader_stages.emplace_back(vk::PipelineShaderStageCreateInfo{
             .stage = vk::ShaderStageFlagBits::eTessellationControl,
@@ -247,7 +257,7 @@ GraphicsPipeline::GraphicsPipeline(
         .requiredSubgroupSize = 64,
     };
     for (auto& stage : shader_stages) {
-        stage.pNext = instance.IsSubgroupSize64Supported() ? &subgroup_size_ci : nullptr;
+        stage.pNext = instance.IsSubgroupSize64Supported(stage.stage) ? &subgroup_size_ci : nullptr;
     }
 
     const auto depth_format =
@@ -423,6 +433,8 @@ GraphicsPipeline::GraphicsPipeline(
 
     auto [pipeline_result, pipe] =
         device.createGraphicsPipelineUnique(pipeline_cache, pipeline_info);
+    ReportPipelineFailure(fmt::format("graphics {}", debug_str), pipeline_result,
+                          std::span<const vk::PipelineShaderStageCreateInfo>{shader_stages});
     if (preloading && pipeline_result != vk::Result::eSuccess) {
         // bbport: a pipeline from the cache the driver rejects is a damaged cache entry: the
         // cache is rebuilt (PipelineCache::WarmUp) instead of stopping the game at every start.

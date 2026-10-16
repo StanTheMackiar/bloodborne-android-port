@@ -13,7 +13,9 @@
 #include <string_view>
 #include <vector>
 
+#ifndef __ANDROID__ // Bionic: no SDL, the app sends no window events (window_android.cpp)
 #include <SDL3/SDL.h>
+#endif
 #include "bbport_settings.h"
 #include "imgui.h"
 #include "imgui_impl_vulkan.h"
@@ -39,6 +41,14 @@ extern "C" void runtime_restart(void); // bb-probe (probe.c)
 namespace BbOverlay {
 
 namespace {
+/// bbport: stands in for a Vulkan function the driver does not give (the WSI functions with no
+/// surface or swapchain extension enabled: the Bionic build presents through the app). The
+/// ImGui backend loads its whole list and stops at the first one missing, leaving the rest
+/// null; it never calls the WSI ones (no platform windows).
+[[noreturn]] void MissingVulkanFunction() {
+    std::fprintf(stderr, "Overlay: a Vulkan function the driver does not provide was called\n");
+    std::abort();
+}
 
 std::mutex imgui_mutex; // the ImGui context: window thread (input) and present thread
 bool initialized = false;
@@ -103,7 +113,9 @@ VKAPI_ATTR VkResult VKAPI_CALL FlushMappedMemoryRanges(VkDevice device, uint32_t
                           : real_flush_ranges(device, uint32_t(mapped.size()), mapped.data());
 }
 
+#ifndef __ANDROID__
 float PixelDensity(SDL_WindowID id);
+#endif
 
 void SetOpen(bool value) {
     if (menu_open.exchange(value) == value) {
@@ -111,6 +123,7 @@ void SetOpen(bool value) {
     }
     // The system cursor shows over the menu (window.cpp); ImGui learns where it is now, not at
     // the next motion: mouse motion is not passed on while the menu is closed.
+#ifndef __ANDROID__
     if (value) {
         if (SDL_Window* window = SDL_GetMouseFocus()) {
             float x = 0.0f, y = 0.0f;
@@ -119,12 +132,14 @@ void SetOpen(bool value) {
             ImGui::GetIO().AddMousePosEvent(x * density, y * density);
         }
     }
+#endif
     if (!value && dirty) {
         dirty = false;
         BbSettings::Save();
     }
 }
 
+#ifndef __ANDROID__
 ImGuiKey KeyFromSdl(SDL_Keycode key) {
     switch (key) {
     case SDLK_TAB: return ImGuiKey_Tab;
@@ -175,6 +190,7 @@ float PixelDensity(SDL_WindowID id) {
     const float density = window ? SDL_GetWindowPixelDensity(window) : 1.0f;
     return density > 0.0f ? density : 1.0f;
 }
+#endif
 
 // Marks the settings dirty when a widget changed them.
 template <typename T>
@@ -760,7 +776,8 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
                 real_flush_ranges = reinterpret_cast<PFN_vkFlushMappedMemoryRanges>(function);
                 return reinterpret_cast<PFN_vkVoidFunction>(&FlushMappedMemoryRanges);
             }
-            return function;
+            return function ? function
+                            : reinterpret_cast<PFN_vkVoidFunction>(&MissingVulkanFunction);
         },
         const_cast<vk::Instance*>(&vk_instance));
 
@@ -796,6 +813,7 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
     std::printf("Overlay: menu ready (Insert or L3+R3)\n");
 }
 
+#ifndef __ANDROID__
 void UpdateTextInput(SDL_Window* window) {
     bool want = false;
     {
@@ -900,6 +918,7 @@ bool HandleEvent(const SDL_Event& event) {
         return false;
     }
 }
+#endif // !__ANDROID__
 
 bool Visible() {
     return initialized && (menu_open || prompt_active || BbSettings::Get().show_fps);

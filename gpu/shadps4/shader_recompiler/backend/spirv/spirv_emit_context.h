@@ -245,6 +245,9 @@ public:
     boost::container::small_vector<Id, 16> interfaces;
 
     Id output_position{};
+    /// bbport: the gl_PerVertex block of a vertex shader feeding the rect/quad list
+    /// tessellation; output_position is then its Position member (made in the prologue).
+    Id output_per_vertex{};
     Id output_point_size{};
     Id output_layer{};
     Id output_viewport_index{};

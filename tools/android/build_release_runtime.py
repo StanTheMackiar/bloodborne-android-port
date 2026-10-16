@@ -1,94 +1,79 @@
 #!/usr/bin/env python3
 """Build the game-free Android runtime archive embedded in the release APK.
 
-Inputs are the migrated Debian/FEX rootfs, Turnip from build_turnip.sh (in place of the
-rootfs's own) and the local native ARM64 build.
-Python packages are fetched from Debian trixie with Packages-index SHA-256 checks.
+Bionic only: the Android NDK build of the game process (build_bionic.sh: bb-probe, libbbgpu, libbbcpu,
+bb-prepare, kgsl-chip-id), the Bionic PKG tool (build_pkg_tool.sh android), the pre-compiled game patches
+(build_patch_parts.py) and the launch script. No Linux rootfs, no glibc libraries, no Python.
+
+Archive layout (everything under bbport/, extracted into the app's files directory):
+  bbport/bionic/bin/   bb-probe bb-prepare kgsl-chip-id ps4-pkg-tool   (stripped, executable)
+  bbport/bionic/lib/   libbbgpu.so libbbcpu.so liblsfg-bb.so libc++_shared.so   (liblsfg-bb.so: Lossless Scaling
+                       frame generation, loaded by libbbgpu only when it is on; needs the player's own Lossless.dll)
+  bbport/patch-parts/  the settings' BBPATCH2 files (effects, model LOD, resolutions, cheats, ...)
+  bbport/run-bionic.sh bbport/fex-compatible.json bbport/bbport.default.ini
+  bbport/licenses/     ps4-pkg-tool.NOTICE, lsfg-* (the licences of what liblsfg-bb.so contains)
+  bbport/data bbport/logs bbport/user   (empty folders)
 """
 import hashlib
-import lzma
 import os
 import posixpath
+import shutil
 import subprocess
+import sys
 import tarfile
 from pathlib import Path
 
-from fetch_arm64_sysroot import MIRROR, SUITE, extract_deb, fetch, parse_packages
-
 ROOT = Path(__file__).resolve().parents[2]
-SOURCE = ROOT / '.local-deps/android/migration/x/rootfs'
-NATIVE = ROOT / 'out/arm64/bundle'
-PKG_TOOL = ROOT / 'out/arm64/pkg-tool/ps4-pkg-tool'  # build_pkg_tool.sh (the bundle/ dir is rebuilt wholesale)
-PKG_TOOL_NOTICE = ROOT / 'tools/android/ps4-pkg-tool.NOTICE'
-TURNIP = ROOT / 'out/arm64/turnip'
-TURNIP_GEN8 = ROOT / 'out/arm64/turnip-gen8'
-LSFG = ROOT / 'out/arm64/lsfg'  # build_lsfg.sh: the lsfg-vk 1.0 layer with our Turnip patches
-# The rootfs's Turnip, replaced by TURNIP's (rootfs-relative path: file there).
-TURNIP_FILES = {
-    'usr/lib/aarch64-linux-gnu/libvulkan_freedreno.so': 'libvulkan_freedreno.so',
-    'usr/share/vulkan/icd.d/freedreno_icd.aarch64.json': 'freedreno_icd.aarch64.json',
-    'usr/share/drirc.d/00-mesa-defaults.conf': 'drirc.d/00-mesa-defaults.conf',
-    'usr/share/drirc.d/00-turnip-defaults.conf': 'drirc.d/00-turnip-defaults.conf',
-}
-# The Adreno 8xx variant (build_turnip.sh gen8), beside it; run-thor.sh picks one.
-TURNIP_GEN8_FILES = {
-    'usr/lib/aarch64-linux-gnu/libvulkan_freedreno_gen8.so': 'libvulkan_freedreno_gen8.so',
-    'usr/share/vulkan/icd.d/freedreno_gen8_icd.aarch64.json': 'freedreno_gen8_icd.aarch64.json',
-}
+TOOLS = ROOT / 'tools/android'
+BIONIC = ROOT / 'out/bionic'  # build_bionic.sh (+ build_pkg_tool.sh android)
+EBOOT = ROOT / 'out/eboot.elf'  # the patch compiler reads the 1.09 code from it; never packaged
+NDK_STRIP = next(iter(sorted((ROOT / '.local-deps/android/sdk/ndk').glob(
+    '*/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip'))), None)
 OUT = ROOT / 'out/release'
-PYTHON = ('python3.13-minimal', 'libpython3.13-minimal', 'libpython3.13-stdlib')
-SCRIPTS = ('prepare_game.py', 'prepare.py', 'link_modules.py', 'link_libc.py',
-           'content_profile.py', 'game_check.py', 'mods.py', 'mods_android.py')
-EXCLUDE_ROOTFS = ('dev', 'home', 'root', 'run', 'tmp', 'var', 'opt',
-                  'usr/include', 'usr/share/man',
-                  'etc/shadow', 'etc/shadow-', 'etc/gshadow', 'etc/gshadow-',
-                  'etc/passwd', 'etc/passwd-', 'etc/group', 'etc/group-',
-                  'etc/hostname', 'etc/hosts', 'etc/resolv.conf', 'etc/machine-id',
-                  'etc/ssh')
+PROGRAMS = ('bb-probe', 'bb-prepare', 'kgsl-chip-id', 'ps4-pkg-tool')
+LIBRARIES = ('libbbgpu.so', 'libbbcpu.so', 'liblsfg-bb.so', 'libc++_shared.so')
+# build_lsfg_android.sh (run by build_bionic.sh): the licences of liblsfg-bb.so's contents, shipped with it.
+LSFG_LICENSES = ('lsfg-vk-android.LICENSE.md', 'lsfg-dxbc.LICENSE', 'lsfg-pe-parse.LICENSE', 'lsfg-volk.LICENSE.md',
+                 'lsfg-source.txt')
+FILES = (
+    ('tools/android/run-bionic.sh', 'run-bionic.sh', 0o755),
+    ('tools/android/fex-compatible.json', 'fex-compatible.json', 0o644),
+    ('tools/android/thor.ini', 'bbport.default.ini', 0o644),
+    ('tools/android/ps4-pkg-tool.NOTICE', 'licenses/ps4-pkg-tool.NOTICE', 0o644),
+)
+EMPTY_DIRS = ('bbport/data', 'bbport/logs', 'bbport/user')
+# Words that must not appear in a member name: game-derived files, and what the Linux runtime shipped.
+BANNED = ('boot-linked.bin', 'eboot.bin', 'eboot.elf', 'game/', 'save/', 'Lossless.dll',
+          'rootfs', 'python', 'Xvfb', 'fexdroid', 'arm64/', '.py')
 
 
-def checked_packages(dest):
-    index = parse_packages(lzma.decompress(fetch(
-        f'{MIRROR}/dists/{SUITE}/main/binary-arm64/Packages.xz')).decode())
-    records = []
-    for name in PYTHON:
-        record = index[name]
-        data = fetch(f"{MIRROR}/{record['Filename']}")
-        if hashlib.sha256(data).hexdigest() != record['SHA256']:
-            raise ValueError(f'Debian SHA-256 mismatch: {name}')
-        extract_deb(data, dest)
-        records.append(f"{name} {record['Version']} {record['SHA256']}")
-    return records
+def strip(path):
+    if NDK_STRIP:
+        subprocess.run([str(NDK_STRIP), '--strip-debug', str(path)], check=True)
 
 
-def scrub(member):
-    relative = member.name.removeprefix('rootfs/').rstrip('/')
-    if relative and any(relative == item or relative.startswith(item + '/')
-                        for item in EXCLUDE_ROOTFS):
-        return None
-    if member.name.startswith('rootfs/') and relative in TURNIP_FILES:
-        return None
-    if member.isdev() or member.isfifo():
-        return None
-    if member.issym() and member.linkname.startswith('/'):
-        target = member.linkname
-        own_root = '/data/data/com.ducvd89.bloodborne/files/rootfs/'
-        if target.startswith(own_root):
-            target = target[len(own_root):]
-        elif target.startswith(('/system/', '/dev/', '/proc/', '/sys/', '/mnt/', '/storage/')):
-            return None
-        else:
-            target = target.lstrip('/')
-        member.linkname = posixpath.relpath('rootfs/' + target,
-                                            posixpath.dirname(member.name))
-    member.uid = member.gid = 0
-    member.uname = member.gname = ''
-    return member
-
-
-def without_pkg_tool(member):
-    # build_pkg_tool.sh also copies the tool into bundle/bin: it is added once, below.
-    return None if member.name.endswith('/bin/ps4-pkg-tool') else member
+def stage_runtime(stage):
+    """bin/ and lib/ without debug info, executable (the app execs them from its data), and the patches."""
+    shutil.rmtree(stage, ignore_errors=True)
+    for directory, names in (('bin', PROGRAMS), ('lib', LIBRARIES)):
+        (stage / 'bionic' / directory).mkdir(parents=True)
+        for name in names:
+            source = BIONIC / directory / name
+            if not source.is_file():
+                raise SystemExit(f'Missing {source}: build_bionic.sh builds it'
+                                 + (' (build_pkg_tool.sh android for ps4-pkg-tool)' if name == 'ps4-pkg-tool' else ''))
+            target = stage / 'bionic' / directory / name
+            shutil.copy2(source, target)
+            strip(target)
+            target.chmod(0o755)
+    # Anything else in out/bionic/lib would be a library the runtime does not know: refuse a surprise.
+    extra = sorted(p.name for p in (BIONIC / 'lib').iterdir() if p.name not in LIBRARIES)
+    if extra:
+        raise SystemExit(f'Unexpected libraries in {BIONIC / "lib"}: {", ".join(extra)} (add them to LIBRARIES if needed)')
+    if not EBOOT.is_file():
+        raise SystemExit(f'The game patches are compiled from the 1.09 eboot: {EBOOT} is missing')
+    subprocess.run([sys.executable, str(TOOLS / 'build_patch_parts.py'), '--out', str(stage / 'patch-parts'),
+                    '--eboot', str(EBOOT)], check=True)
 
 
 def owned_by_root(member):
@@ -97,77 +82,64 @@ def owned_by_root(member):
     return member
 
 
+def check_links(tar):
+    """Refuses symbolic and hard links that leave the tree (absolute, or climbing out of bbport/), devices and fifos."""
+    for member in tar.getmembers():
+        if member.isdev() or member.isfifo():
+            raise SystemExit(f'Refusing to archive a device or fifo: {member.name}')
+        if member.issym() or member.islnk():
+            target = member.linkname
+            if member.islnk():
+                resolved = posixpath.normpath(target)
+            elif target.startswith('/'):
+                raise SystemExit(f'Refusing a symlink with an absolute target: {member.name} -> {target}')
+            else:
+                resolved = posixpath.normpath(posixpath.join(posixpath.dirname(member.name), target))
+            if resolved.startswith('/') or resolved == '..' or resolved.startswith('../') \
+                    or not (resolved == 'bbport' or resolved.startswith('bbport/')):
+                raise SystemExit(f'Refusing a link that leaves the tree: {member.name} -> {target}')
+        if member.name.startswith('/') or '..' in member.name.split('/'):
+            raise SystemExit(f'Refusing an unsafe member name: {member.name}')
+
+
 def main():
-    if not (SOURCE / 'usr/bin/FEX').is_file() or not (SOURCE / 'usr/lib/aarch64-linux-gnu/libvulkan_freedreno.so').is_file():
-        raise SystemExit('Missing migrated FEX/Turnip rootfs')
-    if not (NATIVE / 'bin/bb-probe').is_file() or not (NATIVE / 'lib/libbbcpu.so').is_file():
-        raise SystemExit('Build the native ARM64 bundle first')
-    if not PKG_TOOL.is_file():
-        raise SystemExit('Build the PKG tool first: tools/android/build_pkg_tool.sh arm64')
-    if not all((TURNIP / name).is_file() for name in TURNIP_FILES.values()):
-        raise SystemExit('Build Turnip first: tools/android/build_turnip.sh')
-    if not all((TURNIP_GEN8 / name).is_file() for name in TURNIP_GEN8_FILES.values()):
-        raise SystemExit('Build the Adreno 8xx Turnip first: tools/android/build_turnip.sh gen8')
-    if not (LSFG / 'liblsfg-vk.so').is_file():
-        raise SystemExit('Build the Lossless Scaling layer first: tools/android/build_lsfg.sh')
     OUT.mkdir(exist_ok=True)
-    overlay = OUT / 'python-overlay'
-    overlay.mkdir(exist_ok=True)
-    records = checked_packages(overlay)
-    subprocess.run(['patchelf', '--set-interpreter',
-                    '/data/data/com.ducvd89.bloodborne/files/rootfs/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1',
-                    str(overlay / 'usr/bin/python3.13')], check=True)
+    stage = OUT / 'runtime-stage'
+    stage_runtime(stage)
     archive = OUT / 'runtime.tar.gz'
     with tarfile.open(archive, 'w:gz', compresslevel=6, format=tarfile.PAX_FORMAT) as tar:
-        tar.add(SOURCE, arcname='rootfs', filter=scrub)
-        # Overlay Debian Python after the base rootfs. Its standard library is needed to
-        # link the user's game files at first launch, never shipped in the APK.
-        for child in sorted(overlay.iterdir()):
-            tar.add(child, arcname='rootfs/' + child.name, filter=scrub)
-        for relative, name in TURNIP_FILES.items():
-            tar.add(TURNIP / name, arcname='rootfs/' + relative, filter=owned_by_root)
-        for relative, name in TURNIP_GEN8_FILES.items():
-            tar.add(TURNIP_GEN8 / name, arcname='rootfs/' + relative, filter=owned_by_root)
-        for name, mode in (('rootfs/tmp', 0o1777), ('rootfs/tmp/.X11-unix', 0o1777),
-                           ('rootfs/run', 0o755), ('rootfs/home', 0o755),
-                           ('rootfs/var', 0o755),
-                           ('rootfs/var/cache', 0o755), ('rootfs/var/log', 0o755)):
-            info = tarfile.TarInfo(name)
-            info.type = tarfile.DIRTYPE
+        tar.add(stage / 'bionic', arcname='bbport/bionic', filter=owned_by_root)
+        tar.add(stage / 'patch-parts', arcname='bbport/patch-parts', filter=owned_by_root)
+        for source, name, mode in FILES:
+            info = tar.gettarinfo(str(ROOT / source), arcname='bbport/' + name)
             info.mode = mode
-            tar.addfile(info)
-        for directory in ('bin', 'lib', 'patch-parts'):
-            tar.add(NATIVE / directory, arcname='bbport/arm64/' + directory, filter=without_pkg_tool)
-        tar.add(LSFG, arcname='bbport/arm64/lsfg', filter=owned_by_root)
-        tar.add(PKG_TOOL, arcname='bbport/arm64/bin/ps4-pkg-tool', filter=owned_by_root)
-        tar.add(PKG_TOOL_NOTICE, arcname='bbport/licenses/ps4-pkg-tool.NOTICE', filter=owned_by_root)
-        for script in SCRIPTS:
-            origin = (ROOT / 'tools/android' if script in ('prepare_game.py', 'mods_android.py')
-                      else ROOT / 'scripts') / script
-            tar.add(origin, arcname='bbport/scripts/' + script)
-        for source, name in (
-            ('tools/android/run-thor.sh', 'run-thor.sh'),
-            ('tools/android/mods.sh', 'mods.sh'),
-            ('tools/android/fex-compatible.json', 'fex-compatible.json'),
-            ('tools/android/thor-gamecontrollerdb.txt', 'thor-gamecontrollerdb.txt'),
-            ('tools/android/thor.ini', 'bbport.default.ini'),
-        ):
-            tar.add(ROOT / source, arcname='bbport/' + name)
-        for name in ('bbport/data', 'bbport/logs', 'bbport/user'):
+            owned_by_root(info)
+            with open(ROOT / source, 'rb') as handle:
+                tar.addfile(info, handle)
+        for name in LSFG_LICENSES:
+            source = BIONIC / 'licenses' / name
+            if not source.is_file():
+                raise SystemExit(f'Missing {source}: tools/android/build_lsfg_android.sh writes it')
+            info = tar.gettarinfo(str(source), arcname='bbport/licenses/' + name)
+            info.mode = 0o644
+            owned_by_root(info)
+            with open(source, 'rb') as handle:
+                tar.addfile(info, handle)
+        for name in EMPTY_DIRS:
             info = tarfile.TarInfo(name)
             info.type = tarfile.DIRTYPE
             info.mode = 0o755
             tar.addfile(info)
+    with tarfile.open(archive) as tar:
+        check_links(tar)
+        names = tar.getnames()
+    bad = [name for name in names if any(word in name for word in BANNED)]
+    if bad:
+        archive.unlink()
+        raise SystemExit('Refusing to package a game-derived or Linux-runtime file: ' + ', '.join(bad[:5]))
     digest = hashlib.file_digest(archive.open('rb'), 'sha256').hexdigest()
     (OUT / 'runtime.sha256').write_text(digest + '\n')
-    (OUT / 'runtime.python-packages.txt').write_text('\n'.join(records) + '\n')
-    with tarfile.open(archive) as tar:
-        names = tar.getnames()
-    banned = ('boot-linked.bin', 'eboot.bin', 'eboot.elf', 'game/', 'save/', 'Lossless.dll')
-    if any(any(word in name for word in banned) for name in names):
-        archive.unlink()
-        raise SystemExit('Refusing to package a game-derived file')
-    print(f'Runtime: {archive} ({archive.stat().st_size:,} bytes), sha256 {digest}')
+    print(f'Runtime: {archive} ({archive.stat().st_size:,} bytes, {len(names)} entries), sha256 {digest}')
 
 
 if __name__ == '__main__':

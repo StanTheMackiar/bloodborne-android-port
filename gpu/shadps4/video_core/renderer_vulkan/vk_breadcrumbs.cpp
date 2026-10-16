@@ -8,6 +8,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <vector>
 #include <sys/stat.h>
 #include <unistd.h>
 #include "video_core/renderer_vulkan/vk_breadcrumbs.h"
@@ -55,14 +56,84 @@ struct ArgsNote {
 };
 std::array<ArgsNote, ArgSlots> args_notes{};
 
+/// bbport: without VK_AMD_buffer_marker (Adreno, Mali...), BB_BREADCRUMBS=1 marks with timestamp
+/// queries: each mark resets its query slot from the host and writes a timestamp after all the
+/// work before it; the newest available timestamp of a stream is its marker.
+constexpr u32 TsPerStream = 8192;
+vk::Device ts_device{};
+vk::QueryPool ts_pool{};
+std::unique_ptr<std::atomic<u32>[]> ts_values; ///< the marker value each slot was written for
+std::unique_ptr<u32[]> cpu_markers;            ///< markers and args (zero) in timestamp mode
+
+void InitTimestamps(const Instance& instance) {
+    const auto families = instance.GetPhysicalDevice().getQueueFamilyProperties();
+    const u32 family = instance.GetGraphicsQueueFamilyIndex();
+    if (family >= families.size() || families[family].timestampValidBits == 0 ||
+        !instance.IsHostQueryResetSupported()) {
+        std::printf("GPU breadcrumbs: no buffer markers and no timestamps with host reset, GPU "
+                    "hangs will not be located\n");
+        return;
+    }
+    ts_device = instance.GetDevice();
+    const auto [result, pool] = ts_device.createQueryPool({
+        .queryType = vk::QueryType::eTimestamp,
+        .queryCount = MaxStreams * TsPerStream,
+    });
+    if (result != vk::Result::eSuccess) {
+        std::printf("GPU breadcrumbs: no timestamp query pool (%s)\n", vk::to_string(result).c_str());
+        return;
+    }
+    ts_pool = pool;
+    ts_device.resetQueryPool(ts_pool, 0, MaxStreams * TsPerStream);
+    ts_values = std::make_unique<std::atomic<u32>[]>(MaxStreams * TsPerStream);
+    cpu_markers = std::make_unique<u32[]>((ArgsOffset + ArgSlots * 16) / sizeof(u32));
+    markers = cpu_markers.get();
+    args = markers + ArgsOffset / sizeof(u32);
+    enabled = true;
+    std::printf("GPU breadcrumbs: timestamp queries (no VK_AMD_buffer_marker), BB_BREADCRUMBS=1\n");
+}
+
+/// The newest marker value of a stream the GPU wrote (0: none).
+u32 ReadMarker(u32 stream) {
+    if (!ts_pool) {
+        return markers[stream * StreamStride / sizeof(u32)];
+    }
+    std::vector<u64> results(TsPerStream * 2);
+    const auto result = ts_device.getQueryPoolResults(
+        ts_pool, stream * TsPerStream, TsPerStream, results.size() * sizeof(u64), results.data(),
+        2 * sizeof(u64), vk::QueryResultFlagBits::e64 | vk::QueryResultFlagBits::eWithAvailability);
+    if (result != vk::Result::eSuccess && result != vk::Result::eNotReady) {
+        return 0;
+    }
+    u64 newest_time = 0;
+    u32 newest = 0;
+    for (u32 i = 0; i < TsPerStream; ++i) {
+        if (results[i * 2 + 1] == 0) {
+            continue;
+        }
+        const u64 time = results[i * 2];
+        const u32 value = ts_values[stream * TsPerStream + i].load(std::memory_order_relaxed);
+        // Equal times: the later mark (marks complete in order).
+        if (time > newest_time || (time == newest_time && s32(value - newest) > 0)) {
+            newest_time = time;
+            newest = value;
+        }
+    }
+    return newest;
+}
+
 void Init(const Instance& instance) {
     const char* env = std::getenv("BB_BREADCRUMBS");
     if (env && env[0] == '0') {
         return;
     }
     if (!instance.IsBufferMarkerSupported()) {
+        if (env && env[0] == '1') {
+            InitTimestamps(instance);
+            return;
+        }
         std::printf("GPU breadcrumbs: VK_AMD_buffer_marker unavailable, GPU hangs will not be "
-                    "located\n");
+                    "located (BB_BREADCRUMBS=1: with timestamp queries)\n");
         return;
     }
     const VkBufferCreateInfo buffer_ci = {
@@ -135,6 +206,11 @@ void PrintEntry(const Stream& stream, u64 id, const char* label) {
     switch (c.kind) {
     case Kind::Pass:
         std::printf(" %s", c.name ? c.name : "?");
+        if (c.count[0] != 0) {
+            std::printf(" (%ux%u, %u colors, %llu layers, depth/stencil/clears %#llx)", c.count[0],
+                        c.count[1], c.count[2], (unsigned long long)c.hash[1],
+                        (unsigned long long)c.hash[0]);
+        }
         break;
     case Kind::Draw:
     case Kind::DrawIndexed:
@@ -252,6 +328,15 @@ void Mark(vk::CommandBuffer cmdbuf, u32 stream, u32 id, bool after) {
     if (!enabled || stream >= MaxStreams) {
         return;
     }
+    if (ts_pool) {
+        const u32 value = id * 2 + (after ? 1 : 0);
+        const u32 slot = stream * TsPerStream + value % TsPerStream;
+        // The slot's previous use is TsPerStream marks old: finished long ago.
+        ts_device.resetQueryPool(ts_pool, slot, 1);
+        ts_values[slot].store(value, std::memory_order_relaxed);
+        cmdbuf.writeTimestamp2(vk::PipelineStageFlagBits2::eAllCommands, ts_pool, slot);
+        return;
+    }
     cmdbuf.writeBufferMarkerAMD(vk::PipelineStageFlagBits::eBottomOfPipe, marker_buffer,
                                 stream * StreamStride, id * 2 + (after ? 1 : 0));
 }
@@ -261,7 +346,7 @@ u32 ArgsSlot() {
 }
 
 void CopyArgs(vk::CommandBuffer cmdbuf, vk::Buffer source, u64 offset, u32 slot) {
-    if (!enabled || slot >= ArgSlots) {
+    if (!enabled || slot >= ArgSlots || !marker_buffer) {
         return;
     }
     cmdbuf.copyBuffer(source, marker_buffer,
@@ -293,7 +378,7 @@ void Report(const char* title, const char* where) {
     for (u32 s = 0; s < count; ++s) {
         const Stream& stream = streams[s];
         const u64 last = stream.next.load() - 1;
-        const u32 marker = markers[s * StreamStride / sizeof(u32)];
+        const u32 marker = ReadMarker(s);
         std::printf("  stream %u (%s): %llu commands noted", s, stream.name,
                     (unsigned long long)last);
         if (last == 0) {
@@ -349,7 +434,7 @@ void PrintProgress() {
         if (last == 0) {
             continue;
         }
-        const u32 marker = markers[s * StreamStride / sizeof(u32)];
+        const u32 marker = ReadMarker(s);
         const u64 newest = last * 2 + 1;
         const u64 value = marker ? newest - u32(u32(newest) - marker) : 0;
         // 2n + 1: n finished; 2n: n started, n - 1 finished.

@@ -20,7 +20,7 @@ import java.util.Set;
  *  (a bbport.ini and no settings_defaults marker). Later updates find the marker and leave the player's
  *  settings alone. The marker holds the revision number; a revision above the stored one applies the
  *  defaults once more (raise REVISION only for that). Runs after RuntimeInstaller extracted the runtime
- *  (that is what brings the defaults file) and before run-thor.sh reads bbport.ini.
+ *  (that is what brings the defaults file) and before run-bionic.sh reads bbport.ini.
  *  When updating, every key of the defaults file takes its default value, except the player's own: the
  *  controller mapping (pad.*), the GPU driver, the mods menu position and language, and the mods switch.
  *  Keys that are not in the defaults file stay as they are, as do the comments. */
@@ -48,7 +48,7 @@ final class SettingsDefaults {
         }
         return out;
     }
-    /** key=value pairs, the last of a key winning (as run-thor.sh's setting()). */
+    /** key=value pairs, the last of a key winning (as run-bionic.sh's setting()). */
     private static Map<String,String> values(List<String> lines) {
         Map<String,String> out=new LinkedHashMap<>();
         for (String line:lines) {
@@ -86,7 +86,7 @@ final class SettingsDefaults {
         boolean first=!ini.isFile();
         List<String> out;
         int changed=0;
-        if (first) out=wantedLines; // what run-thor.sh would copy
+        if (first) out=wantedLines; // what run-bionic.sh would copy
         else {
             List<String> current=lines(ini);
             Map<String,String> before=values(current);
@@ -107,7 +107,7 @@ final class SettingsDefaults {
                 if (!seen.contains(e.getKey())) { out.add(e.getKey()+"="+e.getValue()); ++changed; }
         }
         write(ini,out);
-        // The cheats follow cheats.state while the game runs (run-thor.sh writes it at start too).
+        // The cheats follow cheats.state while the game runs (run-bionic.sh writes it at start too).
         Map<String,String> now=values(out);
         List<String> state=new ArrayList<>();
         state.add(("1".equals(now.get("cheat_health")) ? "1" : "0")+("1".equals(now.get("cheat_items")) ? "1" : "0"));

@@ -31,9 +31,17 @@ namespace Detail {
 /// bbport: GuestInPlace() and WriteTracking() once known (every buffer binding asks): 0 not yet,
 /// 1 on, 2 off.
 inline std::atomic<u8> guest_in_place{0}, write_tracking{0};
+inline std::atomic<bool> non_sparse_arenas{false};
 bool ComputeGuestInPlace();
 bool ComputeWriteTracking();
 } // namespace Detail
+
+/// bbport: the buffer cache's arenas are plain buffers with their own memory (no sparse binding):
+/// the driver has none (PanVK on Mali with kbase), or BB_NONSPARSE_ARENAS=1. Set by the BufferCache
+/// at construction; the in-place modes (sparse arena bound to guest memory chunks) are off then.
+inline bool NonSparseArenas() {
+    return Detail::non_sparse_arenas.load(std::memory_order_relaxed);
+}
 
 /// bbport BB_GUEST_IN_PLACE=1: the GPU uses the game's direct memory where it is (the arena is bound to
 /// the Vulkan chunks it lives in, gpu/shim/bbport_guest_memory.cpp) instead of copies in VRAM.
@@ -69,6 +77,9 @@ enum class MemoryType : u8 {
     HostCached,   ///< Requires a host visible memory type optimized for GPU to CPU readbacks
     Stream,       ///< Requests device local host visible buffer, falling back host memory.
     Sparse,       ///< Requires an unbacked sparse resident buffer.
+    /// bbport: a plain device buffer that owns one dedicated VkDeviceMemory of its full size,
+    /// allocated and bound at creation (BufferCache arenas without sparse binding).
+    Backed,
 };
 
 constexpr vk::BufferUsageFlags ReadFlags =
@@ -90,7 +101,9 @@ struct UniqueBuffer {
         : device{other.device}, buffer{std::exchange(other.buffer, VK_NULL_HANDLE)},
           bda_addr{std::exchange(other.bda_addr, 0)},
           allocator{std::exchange(other.allocator, VK_NULL_HANDLE)},
-          allocation{std::exchange(other.allocation, VK_NULL_HANDLE)} {}
+          allocation{std::exchange(other.allocation, VK_NULL_HANDLE)},
+          memory{std::exchange(other.memory, VK_NULL_HANDLE)},
+          memory_size{std::exchange(other.memory_size, 0)} {}
 
     UniqueBuffer& operator=(UniqueBuffer&& other) noexcept {
         if (this != &other) {
@@ -100,6 +113,8 @@ struct UniqueBuffer {
             bda_addr = std::exchange(other.bda_addr, 0);
             allocator = std::exchange(other.allocator, VK_NULL_HANDLE);
             allocation = std::exchange(other.allocation, VK_NULL_HANDLE);
+            memory = std::exchange(other.memory, VK_NULL_HANDLE);
+            memory_size = std::exchange(other.memory_size, 0);
         }
         return *this;
     }
@@ -114,6 +129,9 @@ struct UniqueBuffer {
     vk::DeviceAddress bda_addr{};
     VmaAllocator allocator;
     VmaAllocation allocation{};
+    /// MemoryType::Backed: the buffer's own device memory (freed with it), and its size.
+    vk::DeviceMemory memory{};
+    u64 memory_size{};
 };
 
 struct Buffer {
@@ -148,6 +166,11 @@ struct Buffer {
 
     vk::Buffer Handle() const noexcept {
         return buffer.buffer;
+    }
+
+    /// MemoryType::Backed: the dedicated memory the whole buffer is bound to (offset 0).
+    vk::DeviceMemory BackingMemory() const noexcept {
+        return buffer.memory;
     }
 
     vk::DeviceAddress BufferDeviceAddress() const noexcept {

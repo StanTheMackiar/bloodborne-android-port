@@ -240,6 +240,8 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceShaderMixedFloatDotProductFeaturesVALVE,
         vk::PhysicalDeviceCooperativeMatrixFeaturesKHR, vk::PhysicalDeviceShaderFloat8FeaturesEXT>();
     features = feature_chain.get().features;
+    std::printf("GPU sparse features: sparseBinding=%u sparseResidencyBuffer=%u\n",
+                features.sparseBinding, features.sparseResidencyBuffer);
 
     const vk::StructureChain properties_chain = physical_device.getProperties2<
         vk::PhysicalDeviceProperties2, vk::PhysicalDeviceVulkan11Properties,
@@ -248,6 +250,9 @@ bool Instance::CreateDevice() {
     vk11_props = properties_chain.get<vk::PhysicalDeviceVulkan11Properties>();
     vk12_props = properties_chain.get<vk::PhysicalDeviceVulkan12Properties>();
     vk13_props = properties_chain.get<vk::PhysicalDeviceVulkan13Properties>();
+    std::printf("GPU subgroup sizes %u..%u, required-size stages %#x\n",
+                vk13_props.minSubgroupSize, vk13_props.maxSubgroupSize,
+                static_cast<u32>(vk13_props.requiredSubgroupSizeStages));
     push_descriptor_props = properties_chain.get<vk::PhysicalDevicePushDescriptorPropertiesKHR>();
     LOG_INFO(Render_Vulkan, "Physical device subgroup size {}", vk11_props.subgroupSize);
 
@@ -273,8 +278,21 @@ bool Instance::CreateDevice() {
     };
 
     // Required
+#ifdef __ANDROID__
+    // bbport: Bionic has no swapchain (a directly loaded driver has none, and the game has no
+    // Surface): frames go to the app as AHardwareBuffers with sync-file fences (vk_swapchain_ahb.cpp).
+    for (const char* extension : {VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME,
+                                  VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME,
+                                  VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME}) {
+        ASSERT_MSG(add_extension(extension),
+                   "Required Vulkan device extension unavailable: {} (the AHB swapchain needs "
+                   "AHardwareBuffer import and sync-fd semaphores from the Vulkan driver)",
+                   extension);
+    }
+#else
     ASSERT_MSG(add_extension(VK_KHR_SWAPCHAIN_EXTENSION_NAME),
                "Required Vulkan extension unavailable: {}", VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+#endif
     ASSERT_MSG(add_extension(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME),
                "Required Vulkan extension unavailable: {}", VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
     ASSERT_MSG(add_extension(VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME),
@@ -284,10 +302,32 @@ bool Instance::CreateDevice() {
                "Required Vulkan extension unavailable: {}", VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
 
     const auto robustness2_features = feature_chain.get<vk::PhysicalDeviceRobustness2FeaturesEXT>();
-    ASSERT_MSG(robustness2_features.robustBufferAccess2,
-               "Required Vulkan feature unavailable: robustBufferAccess2");
-    ASSERT_MSG(robustness2_features.robustImageAccess2,
-               "Required Vulkan feature unavailable: robustImageAccess2");
+    // bbport: PanVK (Mali) reports robustImageAccess2 = false on every Mali and robustBufferAccess2
+    // only from arch v11 (G610/G310 are v10), so on Mali the two are optional: the core
+    // robustBufferAccess (VkPhysicalDeviceFeatures) and the Vulkan 1.3 robustImageAccess, both
+    // passed through below, take their place. Every other GPU keeps requiring them.
+    bool enable_robust_buffer_access2 = true;
+    bool enable_robust_image_access2 = true;
+    if (IsMali()) {
+        enable_robust_buffer_access2 = robustness2_features.robustBufferAccess2;
+        enable_robust_image_access2 = robustness2_features.robustImageAccess2;
+        if (!enable_robust_buffer_access2) {
+            std::printf(
+                "Mali: robustBufferAccess2 not reported: relying on core robustBufferAccess (%u)\n",
+                features.robustBufferAccess);
+        }
+        if (!enable_robust_image_access2) {
+            std::printf(
+                "Mali: robustImageAccess2 not reported: relying on Vulkan 1.3 robustImageAccess "
+                "(%u)\n",
+                feature_chain.get<vk::PhysicalDeviceVulkan13Features>().robustImageAccess);
+        }
+    } else {
+        ASSERT_MSG(robustness2_features.robustBufferAccess2,
+                   "Required Vulkan feature unavailable: robustBufferAccess2");
+        ASSERT_MSG(robustness2_features.robustImageAccess2,
+                   "Required Vulkan feature unavailable: robustImageAccess2");
+    }
     ASSERT_MSG(robustness2_features.nullDescriptor,
                "Required Vulkan feature unavailable: nullDescriptor");
 
@@ -562,8 +602,8 @@ bool Instance::CreateDevice() {
             .depthClipEnable = true,
         },
         vk::PhysicalDeviceRobustness2FeaturesEXT{
-            .robustBufferAccess2 = true,
-            .robustImageAccess2 = true,
+            .robustBufferAccess2 = enable_robust_buffer_access2,
+            .robustImageAccess2 = enable_robust_image_access2,
             .nullDescriptor = true,
         },
         vk::PhysicalDeviceVertexInputDynamicStateFeaturesEXT{

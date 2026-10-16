@@ -1,5 +1,5 @@
 /* Prints the Adreno chip id KGSL reports (e.g. 0x43050a01 Adreno 740, 0x44050001 Adreno 830),
- * the id Turnip matches in freedreno_devices.py. run-thor.sh picks the Turnip variant with it.
+ * the id Turnip matches in freedreno_devices.py. The app uses it to mark the matching Turnip build in the driver download list.
  * The structures are KGSL's ioctl ABI (msm_kgsl.h), declared here to need no kernel headers. */
 #define _POSIX_C_SOURCE 200809L
 #include <fcntl.h>

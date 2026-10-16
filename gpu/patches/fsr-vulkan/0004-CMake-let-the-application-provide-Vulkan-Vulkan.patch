@@ -1,0 +1,21 @@
+From: Cid <cloud@ngandang.xyz>
+Subject: [PATCH] CMake: let the application provide Vulkan::Vulkan
+
+---
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 2ca94cc..1a5dbcc 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -33,7 +33,11 @@ if(NOT FFX_VK_PORTABLE_FSR4_V07_TEST_ASSET_DIR)
+     endif()
+ endif()
+ 
+-find_package(Vulkan REQUIRED)
++# bbport: an application that loads its Vulkan driver itself (Bionic: no libvulkan linked) defines
++# Vulkan::Vulkan (headers only) beforehand.
++if(NOT TARGET Vulkan::Vulkan)
++  find_package(Vulkan REQUIRED)
++endif()
+ 
+ # This fixed public-SDK profile is an embedded portable-backend asset, not a
+ # test-only development file. The generator updates this directory atomically.

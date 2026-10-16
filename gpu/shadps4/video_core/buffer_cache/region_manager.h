@@ -14,9 +14,9 @@
 
 #ifdef __unix__
 #include "common/adaptive_mutex.h"
-#else
-#include "common/spin_lock.h"
 #endif
+// bbport: Bionic has no PTHREAD_ADAPTIVE_MUTEX_INITIALIZER_NP: LockType falls back to SpinLock.
+#include "common/spin_lock.h"
 #include "common/debug.h"
 #include "common/types.h"
 #include "video_core/buffer_cache/region_definitions.h"

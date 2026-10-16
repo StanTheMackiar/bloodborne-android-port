@@ -192,6 +192,9 @@ void Dlss::AppendInstanceExtensions(std::vector<const char*>& enabled) {
     if (!impl->api->InstanceExtensions(&count, &required)) {
         return impl->Disable("instance extension query failed");
     }
+    if (!VULKAN_HPP_DEFAULT_DISPATCHER.vkEnumerateInstanceExtensionProperties) {
+        return impl->Disable("the Vulkan driver cannot enumerate instance extensions");
+    }
     const auto [result, extensions] = vk::enumerateInstanceExtensionProperties();
     if (result != vk::Result::eSuccess ||
         !CollectExtensions(required, count, extensions, impl->instance_extensions, enabled)) {

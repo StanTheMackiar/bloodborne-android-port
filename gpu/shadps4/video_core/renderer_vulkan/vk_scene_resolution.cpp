@@ -372,14 +372,17 @@ vk::Pipeline SceneTargets::ResamplePipeline(vk::Format format, bool stencil) {
     const vk::PipelineViewportStateCreateInfo viewport_info{};
     const vk::PipelineVertexInputStateCreateInfo vertex_input{};
     const vk::PipelineRasterizationStateCreateInfo raster{.lineWidth = 1.f};
-    auto pipeline = Check(instance.GetDevice().createGraphicsPipelineUnique(VK_NULL_HANDLE, {
+    auto pipeline_rv = instance.GetDevice().createGraphicsPipelineUnique(VK_NULL_HANDLE, {
         .pNext = &rendering, .stageCount = u32(stages.size()), .pStages = stages.data(),
         .pVertexInputState = &vertex_input, .pInputAssemblyState = &input_assembly,
         .pViewportState = &viewport_info, .pRasterizationState = &raster,
         .pMultisampleState = &multisampling, .pDepthStencilState = &depth_state,
         .pColorBlendState = &color_blending, .pDynamicState = &dynamic_info,
         .layout = *resample_layout,
-    }));
+    });
+    ReportPipelineFailure("scene_resolution_resample", pipeline_rv.result,
+                          std::span<const vk::PipelineShaderStageCreateInfo>{stages});
+    auto pipeline = Check(std::move(pipeline_rv));
     const auto result = *pipeline;
     resample_pipelines.emplace_back(key, std::move(pipeline));
     return result;

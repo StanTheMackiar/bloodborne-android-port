@@ -37,6 +37,7 @@
 #include <span>
 #include <sstream>
 #include <system_error>
+#include <thread>
 #include <vector>
 #include <vk_mem_alloc.h>
 
@@ -130,10 +131,25 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
       instance{window, EmulatorSettings.GetGpuId(), EmulatorSettings.IsVkValidationEnabled(),
                EmulatorSettings.IsVkCrashDiagnosticEnabled()},
       draw_scheduler{instance, true}, present_scheduler{instance}, flip_scheduler{instance},
-      swapchain{instance, window}, runtime{instance, draw_scheduler},
+#ifdef __ANDROID__
+      // bbport: Lossless Scaling frame generation first: the multiplier that runs at start sets the
+      // swapchain's buffer count and the app's presentation mode (the state file, bb_lsfg_state.h).
+      lsfg_requested{BbLsfgState::Initial()}, lsfg_watch{lsfg_requested},
+      lsfg{Lsfg::Create(instance, lsfg_requested)},
+      swapchain{instance, window, lsfg ? lsfg->Multiplier() : 0},
+#else
+      swapchain{instance, window},
+#endif
+      runtime{instance, draw_scheduler},
       rasterizer{std::make_unique<Rasterizer>(instance, draw_scheduler, runtime, liverpool)},
       texture_cache{rasterizer->GetTextureCache()} {
+#ifdef __ANDROID__
+    // bbport: the pools below are sized for the most buffers the swapchain can have (frame
+    // generation can be turned on while the game runs: multiplier + 3).
+    const u32 num_images = std::max(swapchain.GetImageCount(), Swapchain::MaxImageCount());
+#else
     const u32 num_images = swapchain.GetImageCount();
+#endif
     const vk::Device device = instance.GetDevice();
 
     // Create presentation frames.
@@ -157,7 +173,6 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
     fsr_pass.Create(device, instance.GetAllocator(), num_images);
     pp_pass.Create(device, swapchain.GetSurfaceFormat().format);
     BbOverlay::Init(instance, swapchain.GetSurfaceFormat().format, num_images);
-
 }
 
 Presenter::~Presenter() {
@@ -645,6 +660,10 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         free_frame();
         return;
     }
+#ifdef __ANDROID__
+    // bbport: a change of the app's Lossless Scaling settings applies here, between two frames.
+    PollLsfgState();
+#endif
     // Recreate the swapchain if the window was resized (or was minimised at the last try).
     if (window.GetWidth() != swapchain.GetWidth() || window.GetHeight() != swapchain.GetHeight() ||
         !swapchain.IsPresentable()) {
@@ -655,14 +674,48 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         }
     }
 
+#ifdef __ANDROID__
+    // bbport: Lossless Scaling frame generation (vk_lsfg.h): the generated frames, then this one. Only
+    // for frames of the size the output wants (the first frames, made before the output was known, are
+    // not: the frame generation context is made once, for the right size).
+    if (lsfg && is_game_frame && !is_reusing_frame) {
+        const vk::Extent2D extent = swapchain.GetExtent();
+        SetExpectedGameSize(s32(extent.width), s32(extent.height));
+        if (frame->width == expected_frame_width && frame->height == expected_frame_height &&
+            PresentWithLsfg(frame)) {
+            free_frame();
+            DebugState.IncFlipFrameNum();
+            return;
+        }
+        if (!lsfg) {
+            ApplyLsfgOutputMode(); // it failed and is off now: normal buffers and mode again
+        }
+    }
+#endif
+
+    if (!SubmitToSwapchain({.image = frame->image,
+                            .width = frame->width,
+                            .height = frame->height,
+                            .frame = frame})) {
+        free_frame();
+        return;
+    }
+    SendToApp();
+    PresentTrace("presented");
+    free_frame();
+    if (!is_reusing_frame && is_game_frame) {
+        DebugState.IncFlipFrameNum();
+    }
+}
+
+bool Presenter::SubmitToSwapchain(const PresentSource& source) {
     PresentTrace("acquire");
     if (!swapchain.AcquireNextImage()) {
         swapchain.Recreate(window.GetWidth(), window.GetHeight());
         if (!swapchain.AcquireNextImage()) {
             // User resizes the window too fast and GPU can't keep up. Skip this frame.
             LOG_WARNING(Render_Vulkan, "Skipping frame!");
-            free_frame();
-            return;
+            return false;
         }
     }
 
@@ -670,7 +723,9 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     // skip frame because of slow swapchain recreation. If a frame skip occurs, we skip signal
     // the frame's present fence and future GetRenderFrame() call will hang waiting for this frame.
     PresentTrace("acquired");
-    const auto reset_result = instance.GetDevice().resetFences(frame->present_done);
+    Frame* const frame = source.frame;
+    const vk::Fence done = frame ? frame->present_done : source.done;
+    const auto reset_result = instance.GetDevice().resetFences(done);
     ASSERT_MSG(reset_result == vk::Result::eSuccess,
                "Unexpected error resetting present done fence: {}", vk::to_string(reset_result));
 
@@ -678,8 +733,10 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     const vk::Image swapchain_image = swapchain.Image();
     auto& scheduler = present_scheduler;
     const auto cmdbuf = scheduler.CommandBuffer();
-    DumpFinalFrameIfDue(instance, scheduler, cmdbuf, frame->image, frame->width, frame->height,
-                        swapchain.GetSurfaceFormat().format);
+    if (frame) {
+        DumpFinalFrameIfDue(instance, scheduler, cmdbuf, frame->image, frame->width, frame->height,
+                            swapchain.GetSurfaceFormat().format);
+    }
 
     if (EmulatorSettings.IsVkHostMarkersEnabled()) {
         cmdbuf.beginDebugUtilsLabelEXT(vk::DebugUtilsLabelEXT{
@@ -690,6 +747,11 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     {
         const vk::Extent2D extent = swapchain.GetExtent();
         SetExpectedGameSize(s32(extent.width), s32(extent.height));
+        // The image's layout and owner when it goes to the display: ePresentSrcKHR for a swapchain;
+        // for an AHardwareBuffer (Bionic) general, released to the foreign queue family.
+        const auto acquire_queues = swapchain.AcquireQueues();
+        const auto release_queues = swapchain.ReleaseQueues();
+        const vk::ImageLayout present_layout = swapchain.PresentLayout();
         const vk::ImageSubresourceRange color_range{
             .aspectMask = vk::ImageAspectFlagBits::eColor,
             .baseMipLevel = 0,
@@ -697,25 +759,31 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
             .baseArrayLayer = 0,
             .layerCount = VK_REMAINING_ARRAY_LAYERS,
         };
+        // bbport: a generated frame (Lossless Scaling) is an AHardwareBuffer image of the frame
+        // generation's device: taken from and given back to the queue family EXTERNAL.
+        const u32 graphics_family = instance.GetGraphicsQueueFamilyIndex();
+        const u32 source_acquire_from = source.external ? VK_QUEUE_FAMILY_EXTERNAL : VK_QUEUE_FAMILY_IGNORED;
+        const u32 source_acquire_to = source.external ? graphics_family : VK_QUEUE_FAMILY_IGNORED;
         const std::array pre_barriers{
             vk::ImageMemoryBarrier{
                 .srcAccessMask = vk::AccessFlagBits::eNone,
                 .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
                 .oldLayout = vk::ImageLayout::eUndefined,
                 .newLayout = vk::ImageLayout::eTransferDstOptimal,
-                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .srcQueueFamilyIndex = acquire_queues.first,
+                .dstQueueFamilyIndex = acquire_queues.second,
                 .image = swapchain_image,
                 .subresourceRange = color_range,
             },
             vk::ImageMemoryBarrier{
-                .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
+                .srcAccessMask = source.external ? vk::AccessFlagBits::eNone
+                                                 : vk::AccessFlagBits::eColorAttachmentWrite,
                 .dstAccessMask = vk::AccessFlagBits::eTransferRead,
                 .oldLayout = vk::ImageLayout::eGeneral,
                 .newLayout = vk::ImageLayout::eTransferSrcOptimal,
-                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .image = frame->image,
+                .srcQueueFamilyIndex = source_acquire_from,
+                .dstQueueFamilyIndex = source_acquire_to,
+                .image = source.image,
                 .subresourceRange = color_range,
             },
         };
@@ -730,9 +798,9 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         };
         cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eTransfer,
                                vk::DependencyFlagBits::eByRegion, clear_done, {}, {});
-        cmdbuf.blitImage(frame->image, vk::ImageLayout::eTransferSrcOptimal, swapchain_image,
+        cmdbuf.blitImage(source.image, vk::ImageLayout::eTransferSrcOptimal, swapchain_image,
                          vk::ImageLayout::eTransferDstOptimal,
-                         MakeImageBlitFit(frame->width, frame->height, extent.width, extent.height),
+                         MakeImageBlitFit(source.width, source.height, extent.width, extent.height),
                          vk::Filter::eLinear);
         // bbport: the settings menu / FPS counter over the frame, at display resolution.
         BbGameMenu::Poll(); // the port's pages in the game's System menu
@@ -744,21 +812,21 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                                                vk::AccessFlagBits::eColorAttachmentWrite
                                          : vk::AccessFlagBits::eNone,
                 .oldLayout = vk::ImageLayout::eTransferDstOptimal,
-                .newLayout = overlay ? vk::ImageLayout::eColorAttachmentOptimal
-                                     : vk::ImageLayout::ePresentSrcKHR,
-                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .newLayout = overlay ? vk::ImageLayout::eColorAttachmentOptimal : present_layout,
+                .srcQueueFamilyIndex = overlay ? VK_QUEUE_FAMILY_IGNORED : release_queues.first,
+                .dstQueueFamilyIndex = overlay ? VK_QUEUE_FAMILY_IGNORED : release_queues.second,
                 .image = swapchain_image,
                 .subresourceRange = color_range,
             },
             vk::ImageMemoryBarrier{
                 .srcAccessMask = vk::AccessFlagBits::eTransferRead,
-                .dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
+                .dstAccessMask = source.external ? vk::AccessFlagBits::eNone
+                                                 : vk::AccessFlagBits::eColorAttachmentWrite,
                 .oldLayout = vk::ImageLayout::eTransferSrcOptimal,
                 .newLayout = vk::ImageLayout::eGeneral,
-                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .image = frame->image,
+                .srcQueueFamilyIndex = source.external ? graphics_family : VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = source.external ? VK_QUEUE_FAMILY_EXTERNAL : VK_QUEUE_FAMILY_IGNORED,
+                .image = source.image,
                 .subresourceRange = color_range,
             },
         };
@@ -771,9 +839,9 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                 .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
                 .dstAccessMask = vk::AccessFlagBits::eNone,
                 .oldLayout = vk::ImageLayout::eColorAttachmentOptimal,
-                .newLayout = vk::ImageLayout::ePresentSrcKHR,
-                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .newLayout = present_layout,
+                .srcQueueFamilyIndex = release_queues.first,
+                .dstQueueFamilyIndex = release_queues.second,
                 .image = swapchain_image,
                 .subresourceRange = color_range,
             };
@@ -790,41 +858,152 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
 
     // bbport: the frame's submission goes out from a recording thread (BB_ASYNC_SUBMIT); this
     // one, waiting for it on the same queue, must not get there first.
-    if (frame->ready_semaphore == draw_scheduler.GetWorkSemaphore()->Handle()) {
+    if (frame && frame->ready_semaphore == draw_scheduler.GetWorkSemaphore()->Handle()) {
         draw_scheduler.WaitSubmitted(frame->ready_tick);
     }
     SubmitInfo info{};
-    info.AddWait(swapchain.GetImageAcquiredSemaphore());
-    info.AddWait(frame->ready_semaphore, frame->ready_tick);
+    if (const vk::Semaphore acquired = swapchain.GetImageAcquiredSemaphore()) { // none: nothing to wait for
+        info.AddWait(acquired);
+    }
+    if (frame) {
+        info.AddWait(frame->ready_semaphore, frame->ready_tick);
+    }
+    if (source.wait) { // bbport: a generated frame is complete when the frame generation says so
+        info.AddWait(source.wait);
+    }
     info.AddSignal(swapchain.GetPresentReadySemaphore());
-    info.AddSignal(frame->present_done);
+    info.AddSignal(done);
     scheduler.Flush(info);
     // bbport: a Vulkan layer in vkQueuePresentKHR (Lossless Scaling frame generation, BB_LSFG)
     // waits there for the present-ready semaphore of that submission. Sent by a recording thread
     // (BB_ASYNC_SUBMIT), it needs submit_mutex, held below for the present: a deadlock unless
     // it is in the queue first.
+    // bbport: so does the AHB swapchain (Bionic): the sync file of the present-ready semaphore can only
+    // be exported once its signal is submitted.
+#ifdef __ANDROID__
+    static const bool present_layer = true;
+#else
     static const bool present_layer = std::getenv("BB_LSFG") != nullptr;
+#endif
     PresentTrace("flushed");
     if (present_layer) {
         scheduler.WaitSubmitted(scheduler.CurrentTick() - 1);
     }
     PresentTrace("submitted");
+    return true;
+}
 
+bool Presenter::SendToApp() {
     // Present to swapchain.
-    {
-        std::scoped_lock submit_lock{Scheduler::submit_mutex};
-        PresentTrace("present");
-        if (!swapchain.Present()) {
-            swapchain.Recreate(window.GetWidth(), window.GetHeight());
+    std::scoped_lock submit_lock{Scheduler::submit_mutex};
+    PresentTrace("present");
+    if (!swapchain.Present()) {
+        swapchain.Recreate(window.GetWidth(), window.GetHeight());
+        return false;
+    }
+    return true;
+}
+
+#ifdef __ANDROID__
+void Presenter::PollLsfgState() {
+    BbLsfgState::State next;
+    if (!lsfg_watch.Poll(next)) {
+        return;
+    }
+    // The same as before is nothing to do, unless it is on and not running: the file was written
+    // again (the player added Lossless.dll and pressed Apply), so try once more.
+    if (next == lsfg_requested && (lsfg || !next.On())) {
+        return;
+    }
+    ApplyLsfgState(next);
+}
+
+void Presenter::ApplyLsfgState(const BbLsfgState::State& next) {
+    lsfg_requested = next;
+    // At a frame boundary: this runs on the present thread, between two Present() calls, so no
+    // buffer of a cycle is held and nothing of the old frame generation is in use. Its flow scale,
+    // model and generated-frame count are fixed when the framegen starts, so every change of an
+    // on state is a new Lsfg: the old one waits for its last batch and the game device, destroys
+    // its context, the shared buffers and the framegen runtime (the library stays loaded); the new
+    // one starts its runtime and makes its context with the next real frame (the first frames after
+    // that only fill its history, as at start).
+    lsfg.reset();
+    if (next.On()) {
+        lsfg = Lsfg::Create(instance, next);
+    }
+    // The swapchain follows what runs, not what was asked: the buffer count for the multiplier and
+    // FIFO (frame generation needs every frame shown for a refresh) only while it is on.
+    ApplyLsfgOutputMode();
+    if (lsfg) {
+        std::printf("LSFG: now x%u, flow %.2f, performance %d\n", next.multiplier,
+                    static_cast<double>(next.flow), next.performance ? 1 : 0);
+    } else {
+        std::printf("LSFG: off\n");
+    }
+    std::fflush(stdout);
+}
+
+void Presenter::ApplyLsfgOutputMode() {
+    swapchain.SetFrameGeneration(lsfg ? lsfg->Multiplier() : 0);
+}
+
+bool Presenter::PresentWithLsfg(Frame* frame) {
+    using Clock = std::chrono::steady_clock;
+    // The frame's own submission may go out from a recording thread: it must be queued before the
+    // copy of the frame (on this queue) waits for it.
+    if (frame->ready_semaphore == draw_scheduler.GetWorkSemaphore()->Handle()) {
+        draw_scheduler.WaitSubmitted(frame->ready_tick);
+    }
+    const int generated = lsfg->ProcessFrame(present_scheduler, frame->image, frame->width, frame->height,
+                                             frame->ready_semaphore, frame->ready_tick);
+    if (generated < 0) {
+        lsfg.reset(); // off for the rest of the run (said in the log): this frame goes the usual way
+        return false;
+    }
+    // Every frame of the cycle is queued to the GPU at once, each into a buffer of its own: the
+    // generated ones in order, then the real one. Only the hand-over to the app is spaced out.
+    std::array<u32, 4> held{};
+    u32 held_count = 0;
+    const u32 buffer_set = swapchain.Generation();
+    for (int i = 0; i < generated; ++i) {
+        const Lsfg::Output& output = lsfg->GetOutput(i);
+        if (!SubmitToSwapchain({.image = output.image,
+                                .width = frame->width,
+                                .height = frame->height,
+                                .external = true,
+                                .wait = output.wait,
+                                .done = output.done})) {
+            break; // no buffer: the rest of the cycle's generated frames are not shown
+        }
+        held[held_count++] = swapchain.CurrentIndex();
+    }
+    const bool real_queued = SubmitToSwapchain({.image = frame->image,
+                                                .width = frame->width,
+                                                .height = frame->height,
+                                                .frame = frame});
+    if (real_queued) {
+        held[held_count++] = swapchain.CurrentIndex();
+    }
+    if (swapchain.Generation() != buffer_set) {
+        return true; // the buffers were made again meanwhile: the held ones are gone with them
+    }
+    const double spacing_ms =
+        std::clamp(lsfg->FrameIntervalMs() / double(generated + 1), 2.0, 60.0);
+    const auto base = Clock::now();
+    for (u32 k = 0; k < held_count; ++k) {
+        if (k > 0 && lsfg->Paced()) {
+            std::this_thread::sleep_until(base + std::chrono::microseconds(s64(spacing_ms * 1000.0 * k)));
+        }
+        swapchain.SelectImage(held[k]);
+        SendToApp(); // (it makes the buffers again when it must: the held rest is void then)
+        if (swapchain.Generation() != buffer_set) {
+            break;
         }
     }
-
-    PresentTrace("presented");
-    free_frame();
-    if (!is_reusing_frame && is_game_frame) {
-        DebugState.IncFlipFrameNum();
-    }
+    return true;
 }
+#endif
+
 
 Frame* Presenter::GetRenderFrame() {
     // Wait for free presentation frames

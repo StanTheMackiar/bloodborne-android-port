@@ -654,13 +654,7 @@ void TemporalUpscaler::CreatePipelines() {
     };
     const auto compute = [&](const auto& code, vk::PipelineLayout layout) {
         const auto module = CompileSPV(code, device);
-        auto pipeline = Check(device.createComputePipelineUnique(
-            {}, vk::ComputePipelineCreateInfo{
-                    .stage = {.stage = vk::ShaderStageFlagBits::eCompute,
-                              .module = module,
-                              .pName = "main"},
-                    .layout = layout,
-                }));
+        auto pipeline = CreateComputePipeline(device, module, layout);
         device.destroyShaderModule(module);
         return pipeline;
     };
@@ -2457,13 +2451,7 @@ bool TemporalUpscaler::EnsureFrameGeneration(u32 w, u32 h, u32 ow, u32 oh) {
         };
         const auto compute = [&](const auto& code, vk::PipelineLayout pipeline_layout) {
             const auto module = CompileSPV(code, device);
-            auto pipeline = Check(device.createComputePipelineUnique(
-                {}, vk::ComputePipelineCreateInfo{
-                        .stage = {.stage = vk::ShaderStageFlagBits::eCompute,
-                                  .module = module,
-                                  .pName = "main"},
-                        .layout = pipeline_layout,
-                    }));
+            auto pipeline = CreateComputePipeline(device, module, pipeline_layout);
             device.destroyShaderModule(module);
             return pipeline;
         };

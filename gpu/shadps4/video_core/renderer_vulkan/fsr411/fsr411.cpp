@@ -16,7 +16,15 @@
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <span>
+#include <string_view>
 #include <vector>
+
+// vk_shader_util.cpp (this file uses the C Vulkan header, not vulkan.hpp, so it cannot include it).
+namespace Vulkan {
+void ReportPipelineFailureSpirv(std::string_view pipeline_name, std::string_view stage,
+                                std::span<const uint32_t> code);
+}
 
 namespace Fsr411 {
 
@@ -531,6 +539,7 @@ struct Upscaler::Impl {
         const VkResult r = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pci, nullptr, &p.pipeline);
         vkDestroyShaderModule(device, module, nullptr);
         if (r != VK_SUCCESS) {
+            Vulkan::ReportPipelineFailureSpirv("fsr411_" + path, "comp", words);
             error = path + ": pipeline creation failed (" + std::to_string(int(r)) + ")";
             return false;
         }

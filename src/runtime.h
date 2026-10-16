@@ -1,5 +1,9 @@
 #ifndef BB_RUNTIME_H
 #define BB_RUNTIME_H
+/* Android (Bionic) builds run without SDL: audio goes to the app's FIFO, the pad comes from BB_PAD_FILE. */
+#if defined(__ANDROID__) && !defined(BB_NO_SDL)
+#define BB_NO_SDL 1
+#endif
 #include <time.h>
 #include <stdint.h>
 #include <stddef.h>

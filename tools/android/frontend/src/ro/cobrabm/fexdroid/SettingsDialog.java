@@ -25,12 +25,21 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
-/** Graphics settings for the Thor, kept in bbport.ini (run-thor.sh reads them at start: scene
+/** Graphics settings for the Thor, kept in bbport.ini (run-bionic.sh reads them at start: scene
  *  size, upscaler, the game's effect patches). Other lines and comments of the file are kept. */
 final class SettingsDialog {
-    /** Scene sizes of the presets at the Thor's 1280x720 output (run-thor.sh). */
-    private static final String[] PRESETS={"Native (1280×720)","Quality (854×480)","Balanced (752×424)",
-        "Performance (640×360)","Ultra performance (426×240)"};
+    /** The outputs offered (output_res; 720p when missing) and the presets: the scene size is the output
+     *  divided by the scale, rounded to even (run-bionic.sh and build_patch_parts.py use the same sizes). */
+    private static final String[] OUTPUT_VALUES={"1920x1080","1280x720","854x480"};
+    private static final String[] OUTPUT_NAMES={"1080p (1920×1080)","720p (1280×720)","480p (854×480)"};
+    private static final int[][] OUTPUT_SIZES={{1920,1080},{1280,720},{854,480}};
+    private static final int OUTPUT_DEFAULT=1;
+    private static final String[] PRESET_NAMES={"Native","Quality","Balanced","Performance","Ultra performance"};
+    private static final double[] PRESET_SCALES={1.0,1.5,1.7,2.0,3.0};
+    private static int scene(int v,int preset) { return Math.max(2,(int)Math.rint(v/PRESET_SCALES[preset]/2)*2); }
+    private static String presetName(int output,int preset) {
+        return PRESET_NAMES[preset]+" ("+scene(OUTPUT_SIZES[output][0],preset)+"×"+scene(OUTPUT_SIZES[output][1],preset)+")";
+    }
     private static final String[][] EFFECTS={
         {"effect_chromatic_aberration","Chromatic aberration","1"},
         {"effect_dof","Depth of field","1"},
@@ -40,8 +49,8 @@ final class SettingsDialog {
         {"effect_dynamic_shadows","Shadows from dynamic lights","1"},
         {"effect_ssr","Screen-space reflections (not in the original)","0"},
     };
-    // FSR 4 (INT8) is not offered: ~470 ms a frame and a black scene on the Adreno 740 (run-thor.sh).
-    /** Game settings: the game patches run-thor.sh applies at start (patch-parts), as upstream's
+    // FSR 4 (INT8) is not offered: ~470 ms a frame and a black scene on the Adreno 740 (run-bionic.sh).
+    /** Game settings: the game patches run-bionic.sh applies at start (patch-parts), as upstream's
      *  System menu pages and launcher offer them: {key, title, note, default}. */
     private static final String[][] GAME_PATCHES={
         {"skip_network_choice","Skip the online/offline screen","Start straight at the main menu, offline (there is no PSN here)","1"},
@@ -49,19 +58,15 @@ final class SettingsDialog {
         {"debug_camera","Free camera","Toggle it with Cross + L3","0"},
         {"debug_menu","Debug menu","The game's own debug menu; needs its font files","0"},
     };
-    /** Cheats: code hooks of the game applied at start (build_thor_patch_parts.py, run-thor.sh). */
+    /** Cheats: code hooks of the game applied at start (build_patch_parts.py, run-bionic.sh). */
     private static final String[][] CHEATS={
         {"cheat_health","Infinite health","Your HP refills to full every frame","0"},
         {"cheat_items","Infinite blood vials and items","Using a blood vial, bullet or other item leaves its count as it was "
             +"(items moved to storage or given away stay too)","0"},
     };
     private static final String[] UPSCALER_VALUES={"off","fsr3"};
-    private static final String[] UPSCALER_NAMES={"Off (render at 1280×720)","FSR 3.1"};
+    private static final String[] UPSCALER_NAMES={"Off","FSR 3.1"};
     private static final int FSR3=1;
-    private static final String[] LSFG_VALUES={"0","2","3","4"};
-    private static final String[] LSFG_NAMES={"Off","2× frames","3× frames","4× frames"};
-    private static final String[] LSFG_FLOW_VALUES={"1.0","0.75","0.5"};
-    private static final String[] LSFG_FLOW_NAMES={"1.0 (best quality)","0.75","0.5 (fastest)"};
     private static final String[] FPS_VALUES={"30","40","45","60","0"};
     private static final String[] FPS_NAMES={"30 (the game's own)","40","45","60","Unlimited"};
     /** Snapdragon 8 Gen 2: three Cortex-A510, four Cortex-A715, one Cortex-X3. */
@@ -113,14 +118,20 @@ final class SettingsDialog {
         return temporary.renameTo(file);
     }
     /** One setting, written at once (the GPU driver menu). Before the first start the file is
-     *  the defaults (bbport.default.ini, as run-thor.sh would copy it) plus this line. */
+     *  the defaults (bbport.default.ini, as run-bionic.sh would copy it) plus this line. */
     boolean set(String key,String value) {
+        Map<String,String> changed=new LinkedHashMap<>(); changed.put(key,value); return setAll(changed);
+    }
+    /** Several settings, written together (the Frame generation menu). */
+    boolean setAll(Map<String,String> changed) {
         File defaults=new File(file.getParentFile(),"bbport.default.ini");
         if (!file.isFile() && defaults.isFile())
             try { java.nio.file.Files.copy(defaults.toPath(),file.toPath()); }
             catch (Exception ex) { android.util.Log.e("Bloodborne","settings: "+ex); }
-        load(); Map<String,String> changed=new LinkedHashMap<>(); changed.put(key,value); return save(changed);
+        load(); return save(changed);
     }
+    /** The settings as they are in the file now. */
+    Map<String,String> read() { load(); return new LinkedHashMap<>(values); }
 
     private TextView heading(LinearLayout box,String title) {
         TextView t=new TextView(activity); t.setText(title); t.setTextSize(15);
@@ -177,27 +188,40 @@ final class SettingsDialog {
         LinearLayout box=new LinearLayout(activity); box.setOrientation(LinearLayout.VERTICAL);
         box.setPadding(dp(24),dp(4),dp(24),dp(8));
 
-        heading(box,"Upscaling (to 1280×720)");
+        heading(box,"Output resolution");
+        final RadioGroup outputs=choices(box,OUTPUT_NAMES,indexOf(OUTPUT_VALUES,get("output_res",""),OUTPUT_DEFAULT));
+        TextView outputNote=new TextView(activity); outputNote.setTextSize(13); outputNote.setAlpha(0.7f);
+        outputNote.setText("Higher output looks sharper but costs more GPU time; the upscaler renders the scene smaller and fills it.");
+        box.addView(outputNote);
+        heading(box,"Upscaling");
         final RadioGroup upscalers=choices(box,UPSCALER_NAMES,indexOf(UPSCALER_VALUES,get("upscaler","fsr3"),1));
         heading(box,"Render resolution");
         int preset=0;
         try { preset=Math.max(0,Math.min(4,Integer.parseInt(get("preset","3")))); } catch (NumberFormatException ignored) { preset=3; }
-        final RadioGroup presets=choices(box,PRESETS,preset);
-        final Switch frameGen=toggle(box,"FSR 3.1 frame generation","1".equals(get("frame_generation","0")));
+        final RadioGroup presets=choices(box,PRESET_NAMES,preset);
+        // FSR 3.1 and Lossless Scaling frame generation: one at a time. Lossless Scaling is set in the
+        // Frame generation menu and applies at once; while it is on this switch is off and locked.
+        final boolean lossless=get("lsfg_multiplier","0").matches("[234]");
+        final Switch frameGen=toggle(box,"FSR 3.1 frame generation",!lossless && "1".equals(get("frame_generation","0")));
         TextView frameGenNote=new TextView(activity); frameGenNote.setTextSize(13); frameGenNote.setAlpha(0.7f);
         frameGenNote.setText("Shows a generated frame between each two (about twice the frames on screen); "
-            +"adds about half a frame of input delay. Best with a steady frame rate.");
+            +"adds about half a frame of input delay. Best with a steady frame rate."
+            +(lossless ? "\n\nLossless Scaling frame generation is on (Frame generation in the menu): turn it off there to use this."
+                : ""));
         box.addView(frameGenNote);
         final TextView presetNote=new TextView(activity); presetNote.setTextSize(13); presetNote.setAlpha(0.7f);
         box.addView(presetNote);
         RadioGroup.OnCheckedChangeListener upscaling=(g,id) -> {
-            int upscaler=checkedIndex(upscalers);
+            int upscaler=checkedIndex(upscalers), output=Math.max(0,checkedIndex(outputs));
             boolean on=upscaler!=0;
+            ((RadioButton)upscalers.getChildAt(0)).setText("Off (render at "+OUTPUT_SIZES[output][0]+"×"+OUTPUT_SIZES[output][1]+")");
+            for (int i=0;i<presets.getChildCount();++i) ((RadioButton)presets.getChildAt(i)).setText(presetName(output,i));
             for (int i=0;i<presets.getChildCount();++i) presets.getChildAt(i).setEnabled(on);
-            frameGen.setEnabled(upscaler==FSR3);
-            presetNote.setText(on ? "Lower is faster; the upscaler fills the screen." : "Without upscaling the game renders at 1280×720.");
+            frameGen.setEnabled(upscaler==FSR3 && !lossless);
+            presetNote.setText(on ? "Lower is faster; the upscaler fills the screen." : "Without upscaling the game renders at the output resolution.");
         };
-        upscalers.setOnCheckedChangeListener(upscaling); upscaling.onCheckedChanged(upscalers,0);
+        upscalers.setOnCheckedChangeListener(upscaling); outputs.setOnCheckedChangeListener(upscaling);
+        upscaling.onCheckedChanged(upscalers,0);
 
         heading(box,"Image");
         final Switch sharpen=toggle(box,"Sharpening","1".equals(get("sharpen","0")));
@@ -221,6 +245,12 @@ final class SettingsDialog {
         TextView fpsNote=new TextView(activity); fpsNote.setTextSize(13); fpsNote.setAlpha(0.7f);
         fpsNote.setText("Above 30 uses the community frame-rate patch (game timing follows the real frame time).");
         box.addView(fpsNote);
+        heading(box,"VSync");
+        final Switch vsync=toggle(box,"VSync","1".equals(get("vsync","0")));
+        TextView vsyncNote=new TextView(activity); vsyncNote.setTextSize(13); vsyncNote.setAlpha(0.7f);
+        vsyncNote.setText("Every frame is shown for at least one screen refresh: smoother pacing, a little more latency. "
+            +"Off: the newest frame is shown, frames finished within the same refresh are skipped.");
+        box.addView(vsyncNote);
 
         heading(box,"CPU cores the game may use");
         final Switch[] cores=new Switch[CORE_NAMES.length];
@@ -247,9 +277,11 @@ final class SettingsDialog {
             .setNegativeButton("Cancel",null)
             .setPositiveButton("Apply & restart",(d,w) -> {
                 Map<String,String> changed=new LinkedHashMap<>();
+                changed.put("output_res",OUTPUT_VALUES[Math.max(0,checkedIndex(outputs))]);
                 changed.put("upscaler",UPSCALER_VALUES[Math.max(0,checkedIndex(upscalers))]);
                 changed.put("fps_limit",FPS_VALUES[Math.max(0,checkedIndex(fpsLimit))]);
-                changed.put("frame_generation",frameGen.isChecked() && checkedIndex(upscalers)!=0 ? "1" : "0");
+                changed.put("frame_generation",frameGen.isChecked() && checkedIndex(upscalers)!=0 && !lossless ? "1" : "0");
+                changed.put("vsync",vsync.isChecked() ? "1" : "0");
                 changed.put("thor_cpus",cpuList(cores));
                 changed.put("preset",String.valueOf(Math.max(0,checkedIndex(presets))));
                 changed.put("sharpen",sharpen.isChecked() ? "1" : "0");
@@ -270,7 +302,6 @@ final class SettingsDialog {
         else new AlertDialog.Builder(activity).setMessage("The settings could not be saved.").setPositiveButton("OK",null).show();
     }
 
-    /** Lossless Scaling frame generation (run-thor.sh: lsfg-vk with the player's Lossless.dll). */
     /** Game settings: the game's patches (applied when the game starts: Apply restarts it). */
     void showGame() {
         load();
@@ -327,81 +358,12 @@ final class SettingsDialog {
             }).show();
     }
 
-    /** "10": infinite health on, items off (run-thor.sh's BB_CHEATS_FILE), written whole then renamed. */
+    /** "10": infinite health on, items off (run-bionic.sh's BB_CHEATS_FILE), written whole then renamed. */
     private static boolean writeCheatState(File state,boolean health,boolean items) {
         File temporary=new File(state.getPath()+".tmp");
         try (Writer w=new OutputStreamWriter(new FileOutputStream(temporary),"UTF-8")) {
             w.write((health ? "1" : "0")+(items ? "1" : "0")+"\n");
         } catch (Exception ex) { android.util.Log.e("Bloodborne","cheats: "+ex); return false; }
         return temporary.renameTo(state);
-    }
-
-    /** Lossless Scaling frame generation. While the game runs with the lsfg-vk layer loaded
-     *  (run-thor.sh wrote lsfg-vk.toml), changes go to that file and apply at once (lsfg-vk watches
-     *  it; off is multiplier 1). Turning it on when the layer was not loaded restarts the game. */
-    void showLossless(java.util.function.BooleanSupplier gameRunning) {
-        load();
-        final File live=new File(file.getParentFile(),"lsfg-vk.toml");
-        LinearLayout box=new LinearLayout(activity); box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(24),dp(4),dp(24),dp(8));
-        heading(box,"Frames");
-        final RadioGroup lsfg=choices(box,LSFG_NAMES,indexOf(LSFG_VALUES,get("lsfg_multiplier","0"),0));
-        heading(box,"Flow scale");
-        final RadioGroup lsfgFlow=choices(box,LSFG_FLOW_NAMES,indexOf(LSFG_FLOW_VALUES,get("lsfg_flow_scale","1.0"),0));
-        final Switch lsfgPerformance=toggle(box,"Performance mode","1".equals(get("lsfg_performance","0")));
-        TextView lsfgNote=new TextView(activity); lsfgNote.setTextSize(13); lsfgNote.setAlpha(0.7f);
-        lsfgNote.setText("Needs Lossless.dll from your own Lossless Scaling (Steam) next to the game "
-            +"folder. Works with any upscaler and replaces FSR 3.1 frame generation. "
-            +"It sees only finished frames, so fast motion and the HUD show more artifacts. Lower flow "
-            +"scale and performance mode are faster. Changes apply while you play; only turning it on "
-            +"after starting without it restarts the game.");
-        box.addView(lsfgNote);
-        RadioGroup.OnCheckedChangeListener lossless=(g,id) -> {
-            boolean on=checkedIndex(lsfg)>0;
-            for (int i=0;i<lsfgFlow.getChildCount();++i) lsfgFlow.getChildAt(i).setEnabled(on);
-            lsfgPerformance.setEnabled(on);
-        };
-        lsfg.setOnCheckedChangeListener(lossless); lossless.onCheckedChanged(lsfg,0);
-
-        ScrollView scroll=new ScrollView(activity); scroll.addView(box);
-        new AlertDialog.Builder(activity).setTitle("Lossless Scaling frame generation").setView(scroll)
-            .setNegativeButton("Cancel",null)
-            .setPositiveButton("Apply",(d,w) -> {
-                Map<String,String> changed=new LinkedHashMap<>();
-                String multiplier=LSFG_VALUES[Math.max(0,checkedIndex(lsfg))];
-                changed.put("lsfg_multiplier",multiplier);
-                changed.put("lsfg_flow_scale",LSFG_FLOW_VALUES[Math.max(0,checkedIndex(lsfgFlow))]);
-                changed.put("lsfg_performance",lsfgPerformance.isChecked() ? "1" : "0");
-                if (gameRunning.getAsBoolean() && live.isFile()) {
-                    boolean ok=save(changed) && writeLsfgProfile(live,"0".equals(multiplier) ? "1" : multiplier,
-                        changed.get("lsfg_flow_scale"),lsfgPerformance.isChecked());
-                    android.widget.Toast.makeText(activity,ok ? "Lossless Scaling: applied"
-                        : "Lossless Scaling: could not apply",android.widget.Toast.LENGTH_SHORT).show();
-                } else if (!"0".equals(multiplier) && gameRunning.getAsBoolean()) {
-                    apply(changed); // the layer loads at start only
-                } else if (!save(changed)) {
-                    new AlertDialog.Builder(activity).setMessage("The settings could not be saved.").setPositiveButton("OK",null).show();
-                }
-            }).show();
-    }
-
-    /** Rewrites the profile values of the running layer's config (written whole, then renamed:
-     *  lsfg-vk reloads on the rename). */
-    private static boolean writeLsfgProfile(File config,String multiplier,String flowScale,boolean performance) {
-        List<String> out=new ArrayList<>();
-        try (BufferedReader r=new BufferedReader(new InputStreamReader(new FileInputStream(config),"UTF-8"))) {
-            for (String line; (line=r.readLine())!=null;) {
-                String t=line.trim();
-                if (t.startsWith("multiplier")) line="multiplier = "+multiplier;
-                else if (t.startsWith("flow_scale")) line="flow_scale = "+flowScale;
-                else if (t.startsWith("performance_mode")) line="performance_mode = "+performance;
-                out.add(line);
-            }
-        } catch (Exception ex) { android.util.Log.e("Bloodborne","lsfg config: "+ex); return false; }
-        File temporary=new File(config.getPath()+".tmp");
-        try (Writer w=new OutputStreamWriter(new FileOutputStream(temporary),"UTF-8")) {
-            for (String line:out) w.write(line+"\n");
-        } catch (Exception ex) { android.util.Log.e("Bloodborne","lsfg config: "+ex); return false; }
-        return temporary.renameTo(config);
     }
 }

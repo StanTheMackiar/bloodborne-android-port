@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Exercises the production target/resolve path on Vulkan (Lavapipe works, no game/window).
+#include "vk_driver_loader.h"
 #include <cassert>
 #include <cmath>
 #include <cstdio>
@@ -17,10 +18,9 @@ int main() {
     Instance instance(0, false);
     // Calls emitted by this executable use a local dispatcher. libbbgpu.so initializes
     // its own default dispatcher while constructing Instance.
-    static vk::detail::DynamicLoader loader;
     vk::detail::DispatchLoaderDynamic dispatch;
     dispatch.init(
-        loader.getProcAddress<PFN_vkGetInstanceProcAddr>("vkGetInstanceProcAddr"));
+        reinterpret_cast<PFN_vkGetInstanceProcAddr>(bb_vk_get_instance_proc_addr()));
     dispatch.init(instance.GetInstance());
     dispatch.init(instance.GetDevice());
     Scheduler scheduler(instance);

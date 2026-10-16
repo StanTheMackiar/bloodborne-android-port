@@ -216,6 +216,10 @@ public:
     bool OcclusionEvent(VAddr address, u32 pairs);
     /// Whether ZPASS_DONE events go to OcclusionEvent (the new memory model).
     static bool OcclusionTranslated();
+    /// bbport: a draw nothing can observe: no attachment, no pixel shader, no shader writes to
+    /// memory and no occlusion counting. It is not recorded.
+    [[nodiscard]] static bool DrawHasNoEffect(const GraphicsPipeline* pipeline,
+                                              const RenderState& state);
     /// ZPASS_DONE events translated so far.
     u64 OcclusionEvents() const;
     /// bbport BB_GUEST_IN_PLACE (in stream order): the GPU clock (PS4: 100 MHz) written as 64 bits

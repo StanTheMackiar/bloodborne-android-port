@@ -39,24 +39,23 @@ import org.json.JSONObject;
 
 /** The Mods menu: loose-file mods for Bloodborne 1.09, folders in the mods folder. Lists them in load
  *  order (a later mod replaces the files of an earlier one) with a switch, move up/down and delete,
- *  installs .zip and .7z archives (ModArchive), and on Apply writes mods.json and mods_enabled and
- *  restarts the game: the runtime (mods.sh) reads those when the game starts. Rows take the gamepad
+ *  installs .zip and .7z archives (ModArchive) and .pkg mods (PkgInstaller), and on Apply writes mods.json
+ *  and mods_enabled and restarts the game: the app (ModManager.apply) reads those when the game starts. Rows take the gamepad
  *  (D-pad, A, B) and touch. */
 final class ModsDialog {
     static final int REQUEST_FOLDER=4, REQUEST_ARCHIVE=5, REQUEST_STORAGE=6;
-    /** The runtime tool in bbport/ (install-game may move to its own script: change it here). */
-    static final String SCRIPT="mods.sh";
     static final String DEFAULT_DIR="/storage/emulated/0/Bloodborne/mods";
     private static final int TEXT=0xffe8dfc9, GOLD=0xffc6ad76, WARN=0xffe5a04b;
 
     /** What the dialog needs from the activity. */
     interface Host {
-        /** Runs bbport/mods.sh in the rootfs with these arguments and returns its output; null when the
-         *  runtime has no mods.sh. Blocks: called off the UI thread. */
-        String script(String... args) throws IOException;
-        /** Runs bbport/<script> with these arguments, passing each output line to `lines` as it comes; destroys the
-         *  process when `cancel` is set. False when the runtime has no mods.sh. Blocks. */
-        boolean scriptStream(String script,Consumer<String> lines,AtomicBoolean cancel,String... args) throws IOException;
+        /** The mods folder (the mods_dir setting, else the default) with mods.json: list, validate. Cheap. */
+        ModManager manager();
+        /** The PKG installer: ps4-pkg-tool from the app's runtime, which is unpacked first when needed. Blocks:
+         *  called off the UI thread. */
+        PkgInstaller pkgInstaller() throws IOException;
+        /** The current game folder (an eboot.bin in a PKG is compared with it), or null. */
+        String gameDir();
         /** The file path of a picked document (shared storage), or null when it has none to read. */
         File pathOf(Uri document);
         boolean hasStorage();
@@ -81,7 +80,7 @@ final class ModsDialog {
         final Map<String,Integer> shared=new HashMap<>();
     }
     private static final class Listing {
-        String dir, error; boolean exists, missing; final List<Mod> mods=new ArrayList<>();
+        String dir, error; boolean exists; final List<Mod> mods=new ArrayList<>();
     }
 
     private final Activity activity;
@@ -112,41 +111,23 @@ final class ModsDialog {
     private boolean live() { return !closed && !host.destroyed() && !activity.isFinishing(); }
     private void background(Runnable r,String name) { Thread t=new Thread(r,name); t.setDaemon(true); t.start(); }
 
-    // ---- The list: mods.sh list, parsed ----
-    private static Mod parse(JSONObject o) {
+    // ---- The list: ModManager.list ----
+    private static Mod parse(ModManager.Mod o) {
         Mod m=new Mod();
-        m.name=o.optString("name"); m.enabled=o.optBoolean("enabled"); m.valid=o.optBoolean("valid");
-        m.problem=o.isNull("problem") ? null : o.optString("problem");
-        m.files=o.optInt("files"); m.bytes=o.optLong("bytes");
+        m.name=o.name; m.enabled=o.enabled; m.valid=o.valid; m.problem=o.problem; m.files=o.files; m.bytes=o.bytes;
         if (!m.valid && m.problem==null) m.problem="Not a usable mod";
         if (!m.valid) m.enabled=false;
-        for (String key:new String[]{"overrides","overriddenBy"}) {
-            JSONArray a=o.optJSONArray(key);
-            for (int i=0;a!=null && i<a.length();++i) {
-                JSONObject other=a.optJSONObject(i);
-                if (other!=null) m.shared.put(other.optString("mod"),other.optInt("files"));
-            }
-        }
+        for (ModManager.Shared s:o.overrides) m.shared.put(s.mod,s.files);
+        for (ModManager.Shared s:o.overriddenBy) m.shared.put(s.mod,s.files);
         return m;
     }
-    static JSONObject json(String output) throws org.json.JSONException {
-        int from=output.indexOf('{'), to=output.lastIndexOf('}');
-        if (from<0 || to<from) throw new org.json.JSONException("no JSON in: "+output.trim());
-        return new JSONObject(output.substring(from,to+1));
-    }
-    /** Runs mods.sh list. Blocks. */
+    /** Lists the mods folder. Blocks. */
     private Listing fetch() {
         Listing l=new Listing();
         try {
-            String out=host.script("list");
-            if (out==null) { l.missing=true; l.error="This version of the runtime cannot manage mods. Update the app's runtime."; }
-            else {
-                JSONObject o=json(out);
-                l.dir=o.optString("modsDir",null); l.exists=o.optBoolean("exists");
-                if (!o.isNull("error")) l.error=o.optString("error");
-                JSONArray a=o.optJSONArray("mods");
-                for (int i=0;a!=null && i<a.length();++i) l.mods.add(parse(a.getJSONObject(i)));
-            }
+            ModManager.Listing o=host.manager().list();
+            l.dir=o.modsDir; l.exists=o.exists; l.error=o.error;
+            for (ModManager.Mod m:o.mods) l.mods.add(parse(m));
         } catch (Exception e) {
             android.util.Log.w("Bloodborne","mods list: "+e);
             l.error="The mods could not be read ("+e.getMessage()+").";
@@ -154,17 +135,14 @@ final class ModsDialog {
         last=l; lastAt=SystemClock.elapsedRealtime();
         return l;
     }
-    /** Runs mods.sh validate for one mod folder. Blocks. */
+    /** Checks one mod folder. Blocks. */
     private Mod validate(String name) throws Exception {
-        String out=host.script("validate",name);
-        if (out==null) throw new IOException("the runtime has no mods.sh");
-        return parse(json(out));
+        return parse(host.manager().validate(name));
     }
 
     // ---- The drawer's row ----
     private static String describe(Listing l) {
         if (l==null) return "";
-        if (l.missing) return "Update the app's runtime";
         if (l.error!=null) return "Could not read the mods";
         int usable=0, on=0, bad=0;
         for (Mod m:l.mods) { if (m.valid) { ++usable; if (m.enabled) ++on; } else ++bad; }
@@ -517,30 +495,22 @@ final class ModsDialog {
                 if (!modsDir.isDirectory() && !modsDir.mkdirs()) throw new IOException("Cannot create the mods folder "+modsDir);
                 target=ModArchive.uniqueDir(modsDir,ModArchive.modName(name));
                 if ("pkg".equals(kind)) {
-                    // The runtime unpacks it (the tool makes the folder); lines "progress <done> <total>", then one JSON line.
+                    // ps4-pkg-tool unpacks it (PkgInstaller); the progress lines come as bytes done of total.
                     main.post(() -> progress.indeterminate("Unpacking "+name+"…"));
                     PkgProgress track=new PkgProgress();
-                    String[] answer={null}; StringBuilder other=new StringBuilder();
-                    boolean known=host.scriptStream(SCRIPT,line -> {
-                        line=line.trim();
-                        long now=SystemClock.elapsedRealtime();
-                        if (track.feed(line,now)) {
-                            String label=track.label, text=track.detail(now); int permille=track.permille();
-                            main.post(() -> { if (live() && !cancel.get()) progress.pkg(label,"Unpacking "+name+"…",permille,text); });
-                        } else if (line.startsWith("{")) answer[0]=line;
-                        else if (!line.isEmpty() && other.length()<400) other.append(line).append('\n');
-                    },cancel,"install-pkg",source.getAbsolutePath(),target.getName());
-                    if (!known) throw new IOException("This runtime cannot install .pkg mods; update the app.");
+                    PkgInstaller installer=host.pkgInstaller();
+                    String gameFolder=host.gameDir();
+                    PkgInstaller.ModResult o=installer.installMod(source,target.getName(),modsDir,
+                        gameFolder==null || gameFolder.isEmpty() ? null : new File(gameFolder),(done,of,label) -> {
+                            track.update(done,of,label,SystemClock.elapsedRealtime());
+                            String text=track.detail(SystemClock.elapsedRealtime()), what=track.label; int permille=track.permille();
+                            main.post(() -> { if (live() && !cancel.get()) progress.pkg(what,"Unpacking "+name+"…",permille,text); });
+                        },cancel::get);
                     if (cancel.get()) throw new CancellationException();
-                    if (answer[0]==null) {
-                        if (other.indexOf("usage:")>=0) throw new IOException("This runtime cannot install .pkg mods; update the app.");
-                        throw new IOException("The .pkg could not be installed"+(other.length()>0 ? ": "+other.toString().trim() : "."));
-                    }
-                    JSONObject o=json(answer[0]);
-                    if (!o.optBoolean("ok")) throw new ModArchive.Rejected(o.isNull("problem") ? "The .pkg could not be installed." : o.optString("problem"));
-                    String made=o.optString("name",target.getName());
+                    if (!o.ok) throw new ModArchive.Rejected(o.problem==null ? "The .pkg could not be installed." : o.problem);
+                    String made=o.name!=null ? o.name : target.getName();
                     target=new File(modsDir,made); installed=true;
-                    if (o.optJSONObject("mod")!=null) verdict=parse(o.getJSONObject("mod"));
+                    if (o.mod!=null) verdict=parse(o.mod);
                     else try { verdict=validate(made); } catch (Exception e) { unchecked=e.getMessage()!=null ? e.getMessage() : e.toString(); }
                     if (verdict!=null) files=verdict.files;
                 } else {

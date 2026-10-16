@@ -156,6 +156,11 @@ public:
         return maintenance_8;
     }
 
+    /// bbport: vkResetQueryPool from the host (Vulkan 1.2 hostQueryReset).
+    bool IsHostQueryResetSupported() const {
+        return vk12_features.hostQueryReset;
+    }
+
     /// bbport: VK_AMD_buffer_marker (GPU breadcrumbs).
     bool IsBufferMarkerSupported() const {
         return buffer_marker;
@@ -271,8 +276,13 @@ public:
     }
 
     /// Returns true if the subgroup size can be set to match guest subgroup size
-    bool IsSubgroupSize64Supported() const {
-        return vk13_features.subgroupSizeControl && vk13_props.maxSubgroupSize >= 64;
+    /// bbport: only for the stages the driver lets a required size be set on (the stock Adreno
+    /// driver takes it for compute alone), and a size inside its range.
+    bool IsSubgroupSize64Supported(
+        vk::ShaderStageFlagBits stage = vk::ShaderStageFlagBits::eCompute) const {
+        return vk13_features.subgroupSizeControl && vk13_props.minSubgroupSize <= 64 &&
+               vk13_props.maxSubgroupSize >= 64 &&
+               bool(vk13_props.requiredSubgroupSizeStages & vk::ShaderStageFlags{stage});
     }
 
     /// Returns true when VK_KHR_workgroup_memory_explicit_layout is supported.
@@ -339,6 +349,17 @@ public:
 
     u32 GetVendorID() const {
         return properties.vendorID;
+    }
+
+    /// bbport: ARM Mali (the PanVK driver): no sparse binding on kbase, no robustImageAccess2.
+    bool IsMali() const {
+        return properties.vendorID == 0x13B5;
+    }
+
+    /// bbport: the device reports sparse binding and sparse resident buffers (the buffer cache's
+    /// sparse arenas). PanVK on kbase reports neither.
+    bool HasSparseBuffers() const {
+        return features.sparseBinding && features.sparseResidencyBuffer;
     }
 
     /// Returns the device ID of the physical device
