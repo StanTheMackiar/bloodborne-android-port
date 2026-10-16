@@ -69,6 +69,7 @@ FEXCore runs in its fastest mode (no x86 memory-ordering emulation, reduced x87 
 
 ## Features
 
+- **Real game speed when the frame rate drops** — new in 0.9.1: frame-rate hooks from bloodborne_pc replace the 60 FPS patches, and the game keeps its speed down to 20 FPS instead of slowing below 30 ([Game speed](#default-settings-and-performance))
 - **Native Android program** — new in 0.9.0: no Linux system on the phone any more; the APK is about 37 MB and frames go straight to the screen
 - **GPU driver picked for you** — new in 0.9.0: Turnip for Adreno 6xx/7xx and 8xx and PanVK for Mali ship inside the APK ([GPU drivers](#gpu-drivers))
 - **Output resolution** (1080p, 720p or 480p) with **FSR 3.1** upscaling presets relative to it, and a **VSync** option — new in 0.9.0
