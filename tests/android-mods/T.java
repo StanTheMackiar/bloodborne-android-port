@@ -52,7 +52,9 @@ final class T {
     }
 
     // ---- files ----
-    static File temp() throws IOException { return Files.createTempDirectory("bbmods").toFile(); }
+    /** A new temporary folder at its real path: on macOS the temp folder is under /var, a link to /private/var, and the
+     *  code under test resolves links (issue #13). */
+    static File temp() throws IOException { return Files.createTempDirectory("bbmods").toRealPath().toFile(); }
     static void write(File f, byte[] data) throws IOException {
         f.getParentFile().mkdirs();
         Files.write(f.toPath(), data);

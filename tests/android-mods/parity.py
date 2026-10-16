@@ -264,8 +264,9 @@ def main():
                 check(f'apply {key} (game itself)', str(game), str(java_folder))
             else:
                 check(f'apply {key} tree', tree(py_folder, game, mods), tree(java_folder, game, mods))
-                check(f'apply {key} folder under out', [py_folder.parent == out_py.resolve(), py_folder.name.startswith('mod-game-')],
-                      [java_folder.parent == out_java.resolve(), java_folder.name.startswith('mod-game-')])
+                # Both resolved: on macOS the temp folder is under /var, a link to /private/var (issue #13).
+                check(f'apply {key} folder under out', [py_folder.resolve().parent == out_py.resolve(), py_folder.name.startswith('mod-game-')],
+                      [java_folder.resolve().parent == out_java.resolve(), java_folder.name.startswith('mod-game-')])
             # Log: the same lines (the per-file conflict lines come in directory order, so compare as sets of lines)
             check(f'apply {key} log', sorted(mods_lines(py_err)), sorted(mods_lines(java_err)))
         # validate, every folder of the fixture and some bad names
