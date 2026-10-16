@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.ducvd89.bloodborne" android:versionCode="23" android:versionName="0.9.2">
+    package="com.ducvd89.bloodborne" android:versionCode="27" android:versionName="0.9.4">
     <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="28" />
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- The menu's "Check for updates" installs the new APK through a PackageInstaller session. -->
@@ -12,9 +12,11 @@
          are not capturable by default on Android 10+). -->
     <application android:label="Bloodborne" android:icon="@drawable/icon"
         android:theme="@style/GameTheme" android:debuggable="true"
-        android:allowBackup="false" android:extractNativeLibs="true" android:isGame="true"
+        android:allowBackup="false" android:extractNativeLibs="true" android:isGame="true" android:appCategory="game"
         android:requestLegacyExternalStorage="true"
         android:allowAudioPlaybackCapture="true">
+        <!-- A game for the OS: Game Mode (performance/battery) for game dashboards and boosters, see game_mode_config. -->
+        <meta-data android:name="android.game_mode_config" android:resource="@xml/game_mode_config" />
         <!-- Classes keep their package: the present bridge (libbbpresent.so) is bound to it (JNI names). -->
         <activity android:name="ro.cobrabm.fexdroid.MainActivity" android:exported="true"
             android:screenOrientation="sensorLandscape"

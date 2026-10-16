@@ -113,6 +113,8 @@ public:
 
     /// bbport: a guest write fault at `device_addr` was handled; unprotect its neighbourhood.
     void ExtendWriteFault(VAddr device_addr, u64 guest_rip = 0);
+    /// bbport: the aligned window ExtendWriteFault unprotects around a fault (BB_FAULT_WINDOW).
+    static u64 FaultWindowBytes();
 
     /// Flushes any GPU modified buffer in the logical page range back to CPU memory.
     void ReadMemory(VAddr device_addr, u64 size, bool is_write = false, bool assume_locks = false);

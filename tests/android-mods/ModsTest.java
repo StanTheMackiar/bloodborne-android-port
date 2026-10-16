@@ -350,21 +350,22 @@ public final class ModsTest {
             long gib = MemoryBudget.GIB_KB;
             // MemTotal as phones report it: 16 GB ~15.2 GB, 12 GB (Poco F7 Pro) 11367156 kB, 8 GB ~7.5 GB.
             MemoryBudget big = MemoryBudget.forMemTotal(15_900_000), twelve = MemoryBudget.forMemTotal(11_367_156);
-            eq(4096L, big.textureMb); eq(0L, big.vramMb); // as before: run-bionic.sh's and the driver's own
-            eq(list("BB_GC_BUDGET_MB=4096"), Arrays.asList(big.environment()));
-            eq(2048L, twelve.textureMb); eq(2048L, twelve.vramMb);
-            eq(list("BB_GC_BUDGET_MB=2048", "BB_VRAM_LIMIT_MB=2048"), Arrays.asList(twelve.environment()));
+            eq(0L, big.textureMb); eq(0L, big.vramMb); // run-bionic.sh's live texture budget, the driver's own VRAM
+            eq(list(), Arrays.asList(big.environment()));
+            eq(0L, twelve.textureMb); eq(2048L, twelve.vramMb);
+            eq(list("BB_VRAM_LIMIT_MB=2048"), Arrays.asList(twelve.environment()));
             eq(1536L, MemoryBudget.forMemTotal(7_600_000).vramMb);
             eq(1024L, MemoryBudget.forMemTotal(5_700_000).vramMb);
-            eq(0L, MemoryBudget.forMemTotal(0).vramMb); eq(4096L, MemoryBudget.forMemTotal(0).textureMb); // unknown
+            eq(0L, MemoryBudget.forMemTotal(0).vramMb); eq(0L, MemoryBudget.forMemTotal(0).textureMb); // unknown
             eq(0L, MemoryBudget.forMemTotal(14 * gib).vramMb); eq(2048L, MemoryBudget.forMemTotal(14 * gib - 1).vramMb);
             eq(2048L, MemoryBudget.forMemTotal(10 * gib).vramMb); eq(1536L, MemoryBudget.forMemTotal(10 * gib - 1).vramMb);
-            eq("Memory: 10.8 GB RAM: a 12 GB phone -> textures 2048 MB, GPU memory taken as 2048 MB", twelve.logLine());
-            eq("Memory: 15.2 GB RAM: the default budget -> textures 4096 MB, GPU memory as the driver reports", big.logLine());
+            eq("Memory: 10.8 GB RAM: a 12 GB phone -> textures from the free memory, GPU memory taken as 2048 MB", twelve.logLine());
+            eq("Memory: 15.2 GB RAM: the default budget -> textures from the free memory, GPU memory as the driver reports", big.logLine());
         });
         test("memory_budget_set_by_hand", () -> {
             MemoryBudget set = MemoryBudget.choose(11_367_156, " 3000 ");
             eq(3000L, set.textureMb); eq(3000L, set.vramMb); contains(set.logLine(), "10.8 GB RAM: set in bbport.ini");
+            eq(list("BB_GC_BUDGET_MB=3000", "BB_VRAM_LIMIT_MB=3000"), Arrays.asList(set.environment()));
             eq(3000L, MemoryBudget.choose(15_900_000, "3000").vramMb); // by hand on a 16 GB phone too
             for (String bad : new String[]{null, "", "abc", "100", "99999"}) eq(2048L, MemoryBudget.choose(11_367_156, bad).vramMb);
         });
@@ -539,13 +540,24 @@ public final class ModsTest {
      *  0x50000 bytes zero as a real PFS header's are, and zeros at each [at, at + length) pair of `zeros` (offsets
      *  in the image). */
     static File makeDataPkgFile(File path, byte[] sfo, int size, int... zeros) throws IOException {
-        byte[] head = makePkg("EP9000-CUSA03173_00-BLOODBORNE0000EU", sfo, 0);
+        byte[] small = makePkg("EP9000-CUSA03173_00-BLOODBORNE0000EU", sfo, 0);
+        // Its entry table and param.sfo moved from 0x440 to 0x1000, after the header as in a real PKG: 0x440 holds
+        // the PFS image's digest, which PkgVerifier checks (set below).
+        byte[] head = new byte[0x1000 + small.length - 0x440];
+        System.arraycopy(small, 0, head, 0, 0x440);
+        System.arraycopy(small, 0x440, head, 0x1000, small.length - 0x440);
+        ByteBuffer.wrap(head).order(ByteOrder.BIG_ENDIAN).putInt(0x18, 0x1000).putInt(0x1000 + 16, 0x1000 + 32);
         int pfs = (head.length + 0xffff) & ~0xffff;
         byte[] body = Arrays.copyOf(head, pfs + size);
         java.util.Random noise = new java.util.Random(7);
         for (int i = pfs + 0x50000; i < body.length; ++i) body[i] = (byte)(1 + noise.nextInt(255));
         for (int i = 0; i < zeros.length; i += 2) Arrays.fill(body, pfs + zeros[i], pfs + zeros[i] + zeros[i + 1], (byte)0);
         ByteBuffer.wrap(body).order(ByteOrder.BIG_ENDIAN).putLong(0x410, pfs).putLong(0x418, size).putLong(0x430, body.length);
+        // The PFS image's digest as a real PKG carries it, zeros included: finding those is the data check's job.
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256").digest(Arrays.copyOfRange(body, pfs, pfs + size));
+            System.arraycopy(digest, 0, body, 0x440, 32);
+        } catch (java.security.NoSuchAlgorithmException e) { throw new IOException(e); }
         write(path, body);
         return path;
     }

@@ -16,6 +16,7 @@
 #ifndef __ANDROID__ // Bionic: no SDL, the app sends no window events (window_android.cpp)
 #include <SDL3/SDL.h>
 #endif
+#include "bbport_display.h"
 #include "bbport_settings.h"
 #include "imgui.h"
 #include "imgui_impl_vulkan.h"
@@ -373,12 +374,16 @@ void Menu() {
             char label[64];
             const float scale = BbSettings::PresetScale(i);
             const int output = s.output_res;
+            // A fixed session (Android: BB_OUTPUT_RES, any aspect ratio) shows its real output.
+            std::uint32_t real_w = 0, real_h = 0;
+            if (BbSettings::FixedRenderSession()) BbDisplay::OutputSize(real_w, real_h);
+            const double out_w = real_w ? real_w : BbSettings::OutputWidths[output];
+            const double out_h = real_h ? real_h : BbSettings::OutputHeights[output];
             std::snprintf(
                 label, sizeof(label),
                 BbSettings::MenuText("%s (x%.1f, render %dx%d)", "%s (x%.1f, рендер %dx%d)"),
                 BbSettings::PresetName(i), scale,
-                int(std::lround(BbSettings::OutputWidths[output] / scale / 2) * 2),
-                int(std::lround(BbSettings::OutputHeights[output] / scale / 2) * 2));
+                int(std::lround(out_w / scale / 2) * 2), int(std::lround(out_h / scale / 2) * 2));
             if (ImGui::Selectable(label, i == preset)) {
                 Store(s.preset, i, true);
             }
@@ -501,7 +506,14 @@ void Menu() {
     ImGui::SeparatorText(BbSettings::MenuText("Output resolution", "Разрешение вывода"));
     static const char* outputs[] = {"1280 x 720", "1920 x 1080", "2560 x 1440", "3840 x 2160"};
     int output = s.output_res;
-    if (ImGui::BeginCombo(BbSettings::MenuText("Output resolution", "Разрешение вывода"),
+    std::uint32_t real_w = 0, real_h = 0;
+    if (BbSettings::FixedRenderSession()) BbDisplay::OutputSize(real_w, real_h);
+    if (real_w) {
+        // Chosen at start (any size and aspect ratio: the app's settings), not one of the list.
+        ImGui::Text(BbSettings::MenuText("Output resolution: %u x %u (aspect ratio %.3f)",
+                                         "Разрешение вывода: %u x %u (соотношение %.3f)"),
+                    real_w, real_h, double(BbDisplay::Aspect()));
+    } else if (ImGui::BeginCombo(BbSettings::MenuText("Output resolution", "Разрешение вывода"),
                           outputs[output])) {
         for (int i = 0; i < BbSettings::OutputCount; ++i) {
             if (ImGui::Selectable(outputs[i], i == output)) {

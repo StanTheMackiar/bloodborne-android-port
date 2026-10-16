@@ -39,6 +39,10 @@ void bbgpu_patch_image(unsigned char *image, uint64_t size);
 /* 1 when bbgpu_patch_image installed the frame rate hooks (bbport_frame_rate.cpp); 0 when it did not
  * (BB_FRAME_HOOKS=0, or a site of the game's code differs): the frame rate patches are the way then. */
 int bbgpu_frame_hooks_installed(void);
+/* Android performance hints (bbport_adpf.cpp): the calling thread is the game's main thread; and a thread
+ * got `name` (the runtime's guest threads), which joins the hint session when it is a frame-critical one. */
+void bbgpu_adpf_register_main(void);
+void bbgpu_adpf_thread_named(const char *name);
 /* Number of symbols registered by the vendored libraries (diagnostics). */
 unsigned bbgpu_symbol_count(void);
 #ifdef __cplusplus

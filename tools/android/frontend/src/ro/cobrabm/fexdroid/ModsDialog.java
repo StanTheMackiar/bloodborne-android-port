@@ -238,7 +238,7 @@ final class ModsDialog {
             File dir=host.folderOf(data.getData());
             if (dir==null) { host.toast("That folder cannot be used."); return; }
             setFolder(dir.getPath().equals(DEFAULT_DIR) ? "" : dir.getPath());
-        } else if (code==REQUEST_ARCHIVE) install(data.getData());
+        } else if (code==REQUEST_ARCHIVE) install(data.getData(),true);
     }
 
     private void pickFolder() {
@@ -452,7 +452,8 @@ final class ModsDialog {
     }
 
     // ---- Install ----
-    private void install(Uri uri) {
+    /** `check`: a .pkg is first checked against the checksums stored in it ("Install anyway" skips that). */
+    private void install(Uri uri,boolean check) {
         if (busy || shown==null || shown.dir==null) return;
         String archiveName="mod.zip"; long total=-1;
         try (android.database.Cursor c=activity.getContentResolver().query(uri,
@@ -475,7 +476,7 @@ final class ModsDialog {
         }
         background(() -> {
             File tmp=null, target=null; Mod verdict=null; int files=0;
-            String failure=null, unchecked=null; boolean cancelled=false, installed=false;
+            String failure=null, unchecked=null, damage=null; boolean cancelled=false, installed=false;
             try {
                 // The file itself when its path is readable; else a copy in the cache.
                 File source=host.pathOf(uri);
@@ -505,14 +506,17 @@ final class ModsDialog {
                             track.update(done,of,label,SystemClock.elapsedRealtime());
                             String text=track.detail(SystemClock.elapsedRealtime()), what=track.label; int permille=track.permille();
                             main.post(() -> { if (live() && !cancel.get()) progress.pkg(what,"Unpacking "+name+"…",permille,text); });
-                        },cancel::get);
+                        },cancel::get,check);
                     if (cancel.get()) throw new CancellationException();
-                    if (!o.ok) throw new ModArchive.Rejected(o.problem==null ? "The .pkg could not be installed." : o.problem);
-                    String made=o.name!=null ? o.name : target.getName();
-                    target=new File(modsDir,made); installed=true;
-                    if (o.mod!=null) verdict=parse(o.mod);
-                    else try { verdict=validate(made); } catch (Exception e) { unchecked=e.getMessage()!=null ? e.getMessage() : e.toString(); }
-                    if (verdict!=null) files=verdict.files;
+                    if (o.damaged!=null) damage=o.damaged;
+                    else if (!o.ok) throw new ModArchive.Rejected(o.problem==null ? "The .pkg could not be installed." : o.problem);
+                    if (damage==null) {
+                        String made=o.name!=null ? o.name : target.getName();
+                        target=new File(modsDir,made); installed=true;
+                        if (o.mod!=null) verdict=parse(o.mod);
+                        else try { verdict=validate(made); } catch (Exception e) { unchecked=e.getMessage()!=null ? e.getMessage() : e.toString(); }
+                        if (verdict!=null) files=verdict.files;
+                    }
                 } else {
                     main.post(() -> progress.indeterminate("Unpacking "+name+"…"));
                     ModArchive.Result result=ModArchive.extract(source,target,new StatFs(modsDir.getPath()).getAvailableBytes(),new Phase("Unpacking"),cancel::get);
@@ -532,7 +536,7 @@ final class ModsDialog {
             // Nothing half-installed stays (the zip/7z unpacker already removed its folder).
             if (!installed && target!=null && target.isDirectory()) ModArchive.deleteTree(target);
             final Mod checked=verdict; final boolean done=installed; final int count=files; final File dest=target;
-            final String problem=failure, notChecked=unchecked; final boolean stopped=cancelled;
+            final String problem=failure, notChecked=unchecked, damaged=damage; final boolean stopped=cancelled;
             main.post(() -> {
                 progress.dismiss();
                 busy=false;
@@ -540,6 +544,7 @@ final class ModsDialog {
                 if (done) { dirty=true; last=null; }
                 reload();
                 if (stopped) { host.toast("Install cancelled."); return; }
+                if (damaged!=null) { damagedDialog(uri,name,damaged); return; }
                 if (problem!=null) { alert("Mod not installed",problem); return; }
                 if (checked==null) { alert("Mod installed",dest.getName()+" was unpacked, but could not be checked: "+notChecked); return; }
                 if (!checked.valid || checked.problem!=null) {
@@ -554,6 +559,16 @@ final class ModsDialog {
                     .setNegativeButton("Later",null).setPositiveButton("Restart now",(d,w) -> apply()).show();
             });
         },"Mods-install");
+    }
+    /** The PKG does not match its own checksums: which parts, and Pick again / Cancel / Install anyway (no check). */
+    private void damagedDialog(Uri uri,String name,String parts) {
+        new AlertDialog.Builder(activity).setTitle("This PKG is damaged").setCancelable(false)
+            .setMessage(name+" doesn't match the checksums stored in it:\n\n"+parts
+                +"\n\nThe file is damaged or incomplete (a download or copy that went wrong). Download or copy it again, "
+                +"then pick it. Installing it as it is may fail or give a broken mod.")
+            .setPositiveButton("Pick again",(d,w) -> pickArchive())
+            .setNegativeButton("Cancel",null)
+            .setNeutralButton("Install anyway",(d,w) -> install(uri,false)).show();
     }
     private void alert(String title,String message) {
         new AlertDialog.Builder(activity).setTitle(title).setMessage(message).setPositiveButton("OK",null).show();

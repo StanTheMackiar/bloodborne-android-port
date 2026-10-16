@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include <cassert>
+#include <cmath>
 #include <cstdio>
 #include "gpu/shadps4/video_core/renderer_vulkan/ui_composition.h"
 
@@ -16,6 +17,14 @@ int main() {
     assert(Choose(false, true, true, true) == Background::None);
     assert(NativeViewport(1920, -1080));
     assert(!NativeViewport(960, -540));
+    // The game's 16:9 screen in an output of another aspect ratio (BbDisplay): its edges, and the
+    // push constant EmitUiEdgeStretch reads.
+    assert(ScreenEdges(1920, 1080)[0] == 1.0f && ScreenEdges(1920, 1080)[1] == 1.0f);
+    assert(std::abs(ScreenEdges(2560, 1080)[0] - (16.0f / 9.0f) / (2560.0f / 1080.0f)) < 1e-5f &&
+           ScreenEdges(2560, 1080)[1] == 1.0f);
+    assert(ScreenEdges(1920, 1200)[0] == 1.0f && ScreenEdges(1920, 1200)[1] < 1.0f);
+    assert(EdgeParam(1.0f, 1.0f, false) == (65535u << 16 | 32767u << 1));
+    assert((EdgeParam(0.75f, 1.0f, true) & 1u) == 1u && EdgeParam(0.0f, 0.0f, false) == 2u);
     assert(MovieShader(0x34e8a281) && MovieShader(0x24042a9b));
     assert(!MovieShader(0x0b0acf50)); // fullscreen post/tonemap also has a native viewport
     assert(!MovieShader(0x6c62a79f)); // shadow geometry

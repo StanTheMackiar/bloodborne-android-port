@@ -16,7 +16,7 @@ src=tools/android/frontend/src/ro/cobrabm/fexdroid
 # The core classes are plain Java 8, as the frontend's javac --release 8 builds them.
 "$jdk/bin/javac" --release 8 -Xlint:-options -d "$out/classes" \
     $src/FsUtil.java $src/MiniJson.java $src/ModLoader.java $src/ModManager.java $src/Sfo.java \
-    $src/GameCheck.java $src/PkgInstaller.java $src/PkgProgress.java $src/RuntimeCleanup.java $src/MemoryBudget.java $src/MovieSkip.java
+    $src/GameCheck.java $src/PkgInstaller.java $src/PkgProgress.java $src/RuntimeCleanup.java $src/MemoryBudget.java $src/MovieSkip.java $src/PkgVerifier.java
 "$jdk/bin/javac" --release 17 -cp "$out/classes" -d "$out/classes" tests/android-mods/T.java tests/android-mods/ModsTest.java \
     tests/android-mods/ParityCli.java tests/android-mods/CleanupTest.java
 "$jdk/bin/java" -cp "$out/classes" ro.cobrabm.fexdroid.ModsTest

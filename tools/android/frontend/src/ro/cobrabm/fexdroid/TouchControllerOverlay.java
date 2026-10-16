@@ -53,15 +53,87 @@ final class TouchControllerOverlay extends View {
     TouchControllerOverlay(Context context,PadBridge pad) {
         super(context); this.pad=pad;
         preferences=context.getSharedPreferences("bloodborne",Context.MODE_PRIVATE);
-        for (int i=0;i<NAMES.length;i++) {
-            String name=NAMES[i];
-            centers.put(name,new PointF(preferences.getFloat("overlay_x_"+name,DEFAULT[i][0]),
-                                        preferences.getFloat("overlay_y_"+name,DEFAULT[i][1])));
-            sizes.put(name,clampSize(preferences.getFloat("overlay_s_"+name,1f)));
-        }
+        load(null);
         setContentDescription("On-screen PlayStation controller");
     }
-    private PointF center(String name) { return centers.get(name); }
+
+    /** One layout per screen shape: a device with several screens or window sizes (a foldable's inner and outer
+     *  screens) keeps a layout for each, applied when the overlay takes that shape. A shape is the aspect ratio in
+     *  steps of 0.05 (profile "a43" = 2.15:1). A shape never edited uses the shared layout (the keys without a
+     *  profile, as saved before profiles), adapted by the edge anchors; editing or resetting on it saves a layout
+     *  of its own (overlay_profile_<shape> marks it, its keys end in @<shape>). */
+    private String profile;
+    private static String shapeOf(int width,int height) { return "a"+Math.round(width*20f/Math.max(1,height)); }
+    private String key(String base,String name,String p) { return base+name+(p==null ? "" : "@"+p); }
+    private void load(String p) {
+        String from=p!=null && preferences.getBoolean("overlay_profile_"+p,false) ? p : null;
+        for (int i=0;i<NAMES.length;i++) {
+            String name=NAMES[i];
+            float x=preferences.getFloat(key("overlay_x_",name,from),DEFAULT[i][0]);
+            float y=preferences.getFloat(key("overlay_y_",name,from),DEFAULT[i][1]);
+            centers.put(name,new PointF(x,y));
+            sizes.put(name,clampSize(preferences.getFloat(key("overlay_s_",name,from),1f)));
+            anchors.put(name,new int[]{preferences.getInt(key("overlay_ax_",name,from),anchorX(x)),
+                                       preferences.getInt(key("overlay_ay_",name,from),anchorY(y))});
+        }
+        profile=p;
+    }
+    /** Saves the whole layout as this screen shape's own. */
+    private void save() {
+        if (profile==null) return;
+        SharedPreferences.Editor editor=preferences.edit().putBoolean("overlay_profile_"+profile,true);
+        for (String name:NAMES) {
+            PointF p=centers.get(name); int[] a=anchors.get(name);
+            editor.putFloat(key("overlay_x_",name,profile),p.x).putFloat(key("overlay_y_",name,profile),p.y)
+                  .putFloat(key("overlay_s_",name,profile),size(name))
+                  .putInt(key("overlay_ax_",name,profile),a[0]).putInt(key("overlay_ay_",name,profile),a[1]);
+        }
+        editor.apply();
+    }
+    /** The layout of the new screen shape (a fold, a window resize). */
+    @Override protected void onSizeChanged(int w,int h,int oldw,int oldh) {
+        super.onSizeChanged(w,h,oldw,oldh);
+        if (w<=0 || h<=0) return;
+        String p=shapeOf(w,h);
+        if (p.equals(profile)) return;
+        release(); dragged=null; editPointer=pinchPointer=-1;
+        load(p); invalidate();
+    }
+    private String shapeName() {
+        if (getHeight()<=0) return "";
+        return String.format(java.util.Locale.ROOT,"%.2f:1",getWidth()/(float)getHeight());
+    }
+    /** Stored positions are in the 1280x720 layout (saved layouts stay valid). The layout follows the screen's
+     *  aspect ratio: each control keeps to the edges it was placed near. Horizontally (on a screen wider than
+     *  16:9) a control in the left third follows the left edge, one in the right third the right edge, one in the
+     *  middle stays in the middle; vertically (on a screen taller than 16:9) one in the top half follows the top
+     *  edge, one in the bottom half the bottom edge. The editor sets a control's edges where it is dropped, on the
+     *  screen as shown (overlay_ax_/overlay_ay_: -1 left/top, 0 middle, 1 right/bottom); a layout saved before
+     *  that takes them from its 16:9 positions. */
+    private final Map<String,int[]> anchors=new HashMap<>();
+    private static int anchorX(float x) { return x<1280f/3f ? -1 : x>1280f*2f/3f ? 1 : 0; }
+    private static int anchorY(float y) { return y<360f ? -1 : 1; }
+    private float extraX() { return Math.max(0f,getWidth()/scale()-1280f); }
+    private float extraY() { return Math.max(0f,getHeight()/scale()-720f); }
+    private float shift(String name) { return anchors.get(name)[0]*extraX()/2f; }
+    private float shiftY(String name) { return anchors.get(name)[1]*extraY()/2f; }
+    /** The edges of a control shown at (x, y) (layout units): by its place on the whole screen. */
+    private void anchorAt(String name,float x,float y) {
+        float ex=extraX(), ey=extraY();
+        int[] a=anchors.get(name);
+        a[0]=anchorX((x+ex/2f)*1280f/(1280f+ex));
+        a[1]=anchorY((y+ey/2f)*720f/(720f+ey));
+    }
+    private final Map<String,PointF> shown=new HashMap<>();
+    /** The control's position on screen (layout units): the stored one plus the edge shifts. */
+    private PointF center(String name) {
+        PointF stored=centers.get(name), p=shown.get(name);
+        if (p==null) { p=new PointF(); shown.put(name,p); }
+        // Kept on the screen (a layout saved on another screen shape may put it past an edge).
+        float ex=extraX()/2f, ey=extraY()/2f;
+        p.set(Math.max(24-ex,Math.min(1256+ex,stored.x+shift(name))),Math.max(24-ey,Math.min(696+ey,stored.y+shiftY(name))));
+        return p;
+    }
     private float size(String name) { Float s=sizes.get(name); return s==null ? 1f : s; }
     private static float clampSize(float s) { return Math.max(MIN_SIZE,Math.min(MAX_SIZE,s)); }
     // The 1280x720 layout drawn at one scale in the centred 16:9 area, as the game (MainActivity):
@@ -137,23 +209,26 @@ final class TouchControllerOverlay extends View {
         if (onEditDone!=null) onEditDone.run();
         onEditDone=null;
     }
+    /** The default layout for this screen shape (saved as its own); before the overlay has a size, the shared one. */
     void resetLayout() {
         SharedPreferences.Editor editor=preferences.edit();
         for (int i=0;i<NAMES.length;i++) {
             String name=NAMES[i]; centers.get(name).set(DEFAULT[i][0],DEFAULT[i][1]); sizes.put(name,1f);
-            editor.remove("overlay_x_"+name).remove("overlay_y_"+name).remove("overlay_s_"+name);
+            anchors.put(name,new int[]{anchorX(DEFAULT[i][0]),anchorY(DEFAULT[i][1])});
+            if (profile==null) editor.remove("overlay_x_"+name).remove("overlay_y_"+name).remove("overlay_s_"+name)
+                                     .remove("overlay_ax_"+name).remove("overlay_ay_"+name);
         }
-        editor.apply(); release(); invalidate();
+        editor.apply(); save(); release(); invalidate();
     }
     private void confirmReset() {
         new android.app.AlertDialog.Builder(getContext()).setTitle("Reset controller layout?")
-            .setMessage("All buttons go back to their default places and sizes.")
+            .setMessage("All buttons go back to their default places and sizes on this screen shape ("+shapeName()+").")
             .setNegativeButton("Cancel",null)
             .setPositiveButton("Reset",(d,w) -> { resetLayout(); selected=null; invalidate(); }).show();
     }
     private void resize(String name,float s) {
         sizes.put(name,clampSize(s));
-        preferences.edit().putFloat("overlay_s_"+name,size(name)).apply();
+        if (profile==null) preferences.edit().putFloat("overlay_s_"+name,size(name)).apply(); else save();
         invalidate();
     }
 
@@ -191,9 +266,10 @@ final class TouchControllerOverlay extends View {
                 sizes.put(dragged,clampSize(pinchSize*now/pinchDistance));
             } else if (index>=0) {
                 float barX=offsetX()/scale(),barY=offsetY()/scale();
-                center(dragged).set(
-                    Math.max(36-barX,Math.min(1244+barX,layoutX(e,index))),
-                    Math.max(36-barY,Math.min(684+barY,layoutY(e,index))));
+                float x=Math.max(36-barX,Math.min(1244+barX,layoutX(e,index)));
+                float y=Math.max(36-barY,Math.min(684+barY,layoutY(e,index)));
+                anchorAt(dragged,x,y); // the edges where it is now; the stored position is relative to them
+                centers.get(dragged).set(x-shift(dragged),y-shiftY(dragged));
             }
             invalidate();
         } else if (action==MotionEvent.ACTION_UP || action==MotionEvent.ACTION_POINTER_UP) {
@@ -201,9 +277,12 @@ final class TouchControllerOverlay extends View {
                 pinchPointer=-1;
                 if (dragged!=null) resize(dragged,size(dragged));
             } else if (id==editPointer && dragged!=null) {
-                PointF p=center(dragged);
-                preferences.edit().putFloat("overlay_x_"+dragged,p.x).putFloat("overlay_y_"+dragged,p.y)
-                    .putFloat("overlay_s_"+dragged,size(dragged)).apply();
+                if (profile==null) {
+                    PointF p=centers.get(dragged); int[] a=anchors.get(dragged);
+                    preferences.edit().putFloat("overlay_x_"+dragged,p.x).putFloat("overlay_y_"+dragged,p.y)
+                        .putInt("overlay_ax_"+dragged,a[0]).putInt("overlay_ay_"+dragged,a[1])
+                        .putFloat("overlay_s_"+dragged,size(dragged)).apply();
+                } else save(); // this screen shape's own layout
                 editPointer=pinchPointer=-1; dragged=null;
                 invalidate();
             }
@@ -330,6 +409,8 @@ final class TouchControllerOverlay extends View {
             paint.setStyle(Paint.Style.FILL); paint.setTextSize(17); paint.setColor(0xffe8dfc9);
             paint.setTextAlign(Paint.Align.CENTER);
             c.drawText(selected==null ? "Drag a button to move it" : "Drag to move · pinch or −/+ to resize",640,BAR_BOTTOM+110,paint);
+            paint.setTextSize(14); paint.setColor(0xb0e8dfc9);
+            c.drawText("Layout for this screen shape ("+shapeName()+"), used whenever the screen has this shape",640,BAR_BOTTOM+136,paint);
         }
         c.restore();
     }

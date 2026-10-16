@@ -59,6 +59,9 @@ struct Profile {
     /// bbport: the game's buffer copy compute shader (its GCN program hash, from the game's profile;
     /// 0 = none): its paged stores go through to the game's memory as well.
     u64 buffer_copy_shader_hash{};
+    /// bbport: the output's aspect ratio is not 16:9 (BbDisplay): vertex shaders snap the UI's
+    /// full-screen fills to the output's corners (EmitUiEdgeStretch, push constant motion_param).
+    bool ui_edge_stretch{};
 
     bool operator==(const Profile&) const = default;
 };

@@ -11,6 +11,7 @@
 #include "game_profile.h"
 #include "bbport_ce_stats.h"
 #include "bbport_toggles.h"
+#include "bbport_fault.h"
 #include "bbport_write_log.h"
 #include "bbport_free_check.h"
 #include "bbport_guest_memory.h"
@@ -917,6 +918,7 @@ void Rasterizer::NotePendingGpuWrite(VAddr address, u64 size) {
 void Rasterizer::NotePendingRead(VAddr address, u64 size) {
     if (draw_pipe && size && OnStageA()) {
         pending_reads.Note(address, size, draw_pipe->NextPacket());
+        NoteFaultRead(address, size);
     }
 }
 
@@ -1163,6 +1165,10 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
                 CollectRingBindings(*stage, used_prepared, ring);
             } else {
                 untracked_reads_packet = draw_pipe->NextPacket(); // bindings not listed
+                fault_unknown_packet = untracked_reads_packet;
+            }
+            if (fault_tracking) {
+                NoteFaultStageReads(*stage);
             }
             ++num_stages;
             size += sizeof(PacketStage) +
@@ -1182,6 +1188,7 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
             NotePendingRead(indirect->args, args_size);
         } else {
             untracked_reads_packet = draw_pipe->NextPacket();
+            fault_unknown_packet = untracked_reads_packet;
         }
         if (indirect->count) {
             NotePendingRead(indirect->count, sizeof(u32));
@@ -1195,8 +1202,19 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
     // the index buffer are still read there: a DumpConstRam over them waits for this packet.
     thread_local boost::container::static_vector<AmdGpu::Buffer, Shader::NUM_BUFFERS> vsharps;
     vsharps.clear();
+    if (fault_tracking) {
+        if (!pipeline) {
+            fault_unknown_packet = draw_pipe->NextPacket(); // FilterDraw: not listed
+        } else if (!pipeline->IsCompute()) {
+            NoteFaultTargets();
+        }
+    }
     if (pipeline && !pipeline->IsCompute()) {
         const auto* graphics = static_cast<const GraphicsPipeline*>(pipeline);
+        if (const auto& fetch = graphics->GetFetchShader();
+            fetch && fetch->attributes.size() > vsharps.capacity()) {
+            fault_unknown_packet = draw_pipe->NextPacket(); // streams not listed
+        }
         if (const auto& fetch = graphics->GetFetchShader();
             fetch && fetch->attributes.size() <= vsharps.capacity()) {
             const auto& vs = graphics->GetStage(Shader::SwStage::Vertex);
@@ -1321,6 +1339,7 @@ bool Rasterizer::RunInOrder(OrderedTask task, const void* data, u32 size, u64 to
     }
     if (reads_guest_memory) {
         untracked_reads_packet = draw_pipe->NextPacket();
+        fault_unknown_packet = untracked_reads_packet;
     }
     const u32 total = sizeof(TaskPacket) + AlignPacket(size);
     u8* out = draw_pipe->Begin(total);
@@ -1719,6 +1738,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     }
 
     // bbport: screen-space (clip disabled) draws into the upscaler's output-size images.
+    UiEdgeStretch(pipeline);
     push_data.xscale *= target_scale[0];
     push_data.xoffset *= target_scale[0];
     push_data.yscale *= target_scale[1];
@@ -1950,6 +1970,7 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
     }
 
     // bbport: screen-space (clip disabled) draws into the upscaler's output-size images.
+    UiEdgeStretch(pipeline);
     push_data.xscale *= target_scale[0];
     push_data.xoffset *= target_scale[0];
     push_data.yscale *= target_scale[1];
@@ -3797,6 +3818,7 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
             attachment_feedback_loop = false;
             push_data.scene_size = begin_memo.scene_size;
             target_scale = begin_memo.target_scale;
+            ui_placement = begin_memo.ui_placement;
             return begin_memo.state;
         }
         ++begin_memo_misses;
@@ -3813,7 +3835,7 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         if (!clears) {
             // Recomputed after the full path: it may have started the scene (scene_started).
             begin_memo = {true, MakeBeginSignature(pipeline), state, push_data.scene_size,
-                          target_scale};
+                          target_scale, ui_placement};
         }
     }
     return state;
@@ -4051,6 +4073,7 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
     // bbport: a pass drawn into the upscaler's output-size images (UI, display pass): every
     // attachment must be redirected, viewports and scissors are scaled.
     target_scale = {1.0f, 1.0f};
+    ui_placement = {};
     if (color_redirected || depth_redirected) {
         u32 color_targets = 0;
         for (u32 cb = 0; cb < state.num_color_attachments; ++cb) {
@@ -4100,6 +4123,10 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
             target_scale = UiComposition::Scale(guest_extent.first, guest_extent.second,
                                                 redirect.width, redirect.height,
                                                 native_coordinates);
+            if (const auto edges = UiComposition::ScreenEdges(redirect.width, redirect.height);
+                native_coordinates && (edges[0] < 1.0f || edges[1] < 1.0f)) {
+                ui_placement = {edges[0], edges[1]};
+            }
         }
     }
 
@@ -4114,6 +4141,7 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         state.width = proxy.width;
         state.height = proxy.height;
         target_scale = {float(size.width) / 1920.0f, float(size.height) / 1080.0f};
+        ui_placement = {};
     }
     if (FrameCapture::Active()) {
         std::array<const VideoCore::ImageInfo*, AmdGpu::NUM_COLOR_BUFFERS> colors{};
@@ -4131,6 +4159,28 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         object_motion->Attach(state, state.width, state.height);
     }
     return state;
+}
+
+void Rasterizer::UiEdgeStretch(const GraphicsPipeline* pipeline) {
+    // Every vertex shader but the motion vectors' has the corner snap (EmitUiEdgeStretch). A picture
+    // over the whole screen (the title's: 2048x1024) keeps its proportions, and so does text (its
+    // glyph sheet is 2048x2048). Masked content (Scaleform's masks are stencil tests: the HUD's item
+    // icons slide in a strip much taller than their slot) and the masks stay.
+    const auto& regs = Regs();
+    if (ui_placement.edge_x == 0.0f || regs.IsClipDisabled() ||
+        pipeline->GetGraphicsKey().motion_vectors ||
+        (regs.depth_control.stencil_enable && regs.depth_buffer.StencilValid())) {
+        return;
+    }
+    const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+    if (ps && !ps->images.empty()) {
+        const auto texture = ps->images[0].GetSharp(*ps);
+        if (u32(texture.width) + 1 >= 2048 || u32(texture.height) + 1 >= 2048) {
+            return;
+        }
+    }
+    push_data.motion_param = UiComposition::EdgeParam(ui_placement.edge_x, ui_placement.edge_y,
+                                                       regs.viewports[0].yscale > 0.0f);
 }
 
 void Rasterizer::Resolve() {
@@ -4271,6 +4321,10 @@ u32 Rasterizer::ReadDataFromGds(u32 gds_offset) {
 
 bool Rasterizer::InvalidateMemory(VAddr addr, u64 size, bool assume_locks) {
     DrainDrawPipe();
+    return InvalidateMemoryUndrained(addr, size, assume_locks);
+}
+
+bool Rasterizer::InvalidateMemoryUndrained(VAddr addr, u64 size, bool assume_locks) {
     if (!IsMapped(addr, size)) {
         // Not GPU mapped memory, can skip invalidation logic entirely.
         return false;
@@ -4323,12 +4377,224 @@ void Rasterizer::OnCpuWrite(VAddr addr, u64 size) {
 }
 
 bool Rasterizer::OnWriteFault(VAddr addr, bool assume_locks, u64 guest_rip) {
-    DrainDrawPipe();
-    if (!InvalidateMemory(addr, 8, assume_locks)) {
+    BbFault::FaultScope fault_scope;
+    DrainForCpuWrite(Common::AlignDown(addr, 4_KB), 4_KB);
+    if (!InvalidateMemoryUndrained(addr, 8, assume_locks)) {
         return false;
     }
     buffer_cache.ExtendWriteFault(addr, guest_rip);
     return true;
+}
+
+void Rasterizer::OnCpuWritePrepare(VAddr addr, u64 size) {
+    if (size == 0 || addr + size < addr) {
+        return;
+    }
+    const auto start_time = std::chrono::steady_clock::now();
+    BbFault::FaultScope fault_scope;
+    constexpr u64 Page = 4_KB;
+    const VAddr first = Common::AlignDown(addr, Page);
+    const VAddr end = Common::AlignUp(addr + size, Page);
+    // The protected pages of the range (a lock-free read of the page manager's counts).
+    VAddr first_protected = 0, last_protected_end = 0;
+    for (VAddr page = first; page < end; page += Page) {
+        if (page_manager.IsWriteProtected(page)) {
+            if (first_protected == 0) {
+                first_protected = page;
+            }
+            last_protected_end = page + Page;
+        }
+    }
+    if (first_protected == 0) {
+        return; // stale bits: nothing to do
+    }
+    // One wait at most, for the whole range (GPU command thread only).
+    DrainForCpuWrite(first_protected, last_protected_end - first_protected);
+    const bool assume_locks = IsGpuSideThread();
+    const u64 window = VideoCore::BufferCache::FaultWindowBytes();
+    u64 pages = 0;
+    VAddr run_begin = 0, run_end = 0;
+    VAddr window_base = ~VAddr{0};
+    bool window_touched = false;
+    const auto flush_run = [&] {
+        if (run_end > run_begin) {
+            InvalidateMemoryUndrained(run_begin, run_end - run_begin, assume_locks);
+        }
+        run_begin = run_end = 0;
+    };
+    const auto close_window = [&] {
+        if (window_touched) {
+            // As after each fault: the unprotected window around the writes.
+            buffer_cache.ExtendWriteFault(window_base, 0);
+        }
+        window_touched = false;
+    };
+    for (VAddr page = first_protected; page < last_protected_end; page += Page) {
+        const VAddr base = Common::AlignDown(page, window);
+        if (base != window_base) {
+            flush_run();
+            close_window();
+            window_base = base;
+        }
+        // The write may have unprotected it (the window of an earlier page): no fault there.
+        if (!page_manager.IsWriteProtected(page)) {
+            continue;
+        }
+        ++pages;
+        window_touched = true;
+        if (buffer_cache.IsRegionGpuModified(page, Page)) {
+            // The GPU's data on it is read back (or twinned) as the fault of the first write to
+            // the page would: only that page, not the run before and after it.
+            flush_run();
+            InvalidateMemoryUndrained(page, 8, assume_locks);
+        } else if (run_end == page) {
+            run_end += Page;
+        } else {
+            flush_run();
+            run_begin = page;
+            run_end = page + Page;
+        }
+    }
+    flush_run();
+    close_window();
+    if (pages != 0) {
+        BbFault::prepare_ranges.fetch_add(1, std::memory_order_relaxed);
+        BbFault::prepare_pages.fetch_add(pages, std::memory_order_relaxed);
+    }
+    BbFault::prepare_ns.fetch_add(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
+                                                             start_time)
+            .count(),
+        std::memory_order_relaxed);
+}
+
+void Rasterizer::DrainForCpuWrite(VAddr addr, u64 size) {
+    if (!draw_pipe || !OnStageA() || draw_pipe->Idle()) {
+        return; // DrainDrawPipe does nothing off the GPU command thread, or with nothing queued
+    }
+    if (BbFault::DrainAlways() || !UseDrawPipe()) {
+        BbFault::drains_done.fetch_add(1, std::memory_order_relaxed);
+        DrainDrawPipe();
+        return;
+    }
+    if (!fault_tracking) {
+        // From here on the packets list what they read; the ones queued until now do not: this
+        // fault waits for them.
+        fault_tracking = true;
+        BbFault::drains_done.fetch_add(1, std::memory_order_relaxed);
+        DrainDrawPipe();
+        return;
+    }
+    // Correctness first: ranges too large for the granule tables wait.
+    u64 newest = fault_unknown_packet;
+    if (size <= 16_MB) {
+        newest = std::max(newest, fault_reads.Newest(addr, size));
+    } else {
+        newest = draw_pipe->NextPacket();
+    }
+    if (draw_pipe->ReachedPacket(newest)) {
+        BbFault::drains_skipped.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    BbFault::drains_done.fetch_add(1, std::memory_order_relaxed);
+    DrainDrawPipe();
+}
+
+void Rasterizer::NoteFaultRead(VAddr address, u64 size) {
+    if (!fault_tracking || size == 0 || !draw_pipe || !OnStageA()) {
+        return;
+    }
+    if (size > 256_MB || address + size < address) {
+        fault_unknown_packet = draw_pipe->NextPacket();
+        return;
+    }
+    fault_reads.Note(address, size, draw_pipe->NextPacket());
+}
+
+void Rasterizer::NoteFaultImage(const AmdGpu::Image& sharp) {
+    const VAddr address = sharp.Address();
+    if (address == 0) {
+        return; // BindTextures binds a null image
+    }
+    const auto format = sharp.GetDataFmt();
+    if (format == AmdGpu::DataFormat::FormatInvalid) {
+        return; // as above
+    }
+    u32 bits = 128;
+    if (static_cast<u32>(format) <= static_cast<u32>(AmdGpu::DataFormat::FormatBc7)) {
+        bits = AmdGpu::NumBitsPerElement(format);
+        if (bits == 0 || bits > 128) {
+            bits = 128;
+        }
+    }
+    const auto type = sharp.GetType();
+    const bool one_d = type == AmdGpu::ImageType::Color1D || type == AmdGpu::ImageType::Color1DArray;
+    // An upper bound of the image's bytes in guest memory (padded dimensions, mips, slices, samples).
+    const u64 width = Common::AlignUp<u64>(std::max<u64>(sharp.width + 1, sharp.Pitch()), 256);
+    const u64 height = one_d ? sharp.height + 1 : Common::AlignUp<u64>(sharp.height + 1, 256);
+    const u64 slices = type == AmdGpu::ImageType::Color3D
+                           ? u64(sharp.depth) + 1
+                           : std::max<u64>(sharp.NumLayers(), 1);
+    u64 bytes = width * height * slices * sharp.NumSamples() * bits / 8;
+    if (sharp.NumLevels() > 1) {
+        bytes *= 2;
+    }
+    constexpr u64 Slack = 64_KB; // swizzle bits of the base address, tails
+    const VAddr from = address > Slack ? address - Slack : 0;
+    NoteFaultRead(from, address - from + bytes + Slack * (1 + u64(sharp.NumLevels())));
+}
+
+void Rasterizer::NoteFaultStageReads(const Shader::Info& stage) {
+    if (stage.uses_dma) {
+        fault_unknown_packet = draw_pipe->NextPacket(); // reads anywhere
+        return;
+    }
+    for (const auto& desc : stage.buffers) {
+        if (desc.IsSpecial()) {
+            continue;
+        }
+        const auto vsharp = desc.GetSharp(stage);
+        if (vsharp.base_address != 0 && vsharp.GetSize() != 0) {
+            NoteFaultRead(vsharp.base_address, vsharp.GetSize());
+        }
+    }
+    for (const auto& desc : stage.images) {
+        NoteFaultImage(desc.GetSharp(stage));
+    }
+    for (const auto& desc : stage.fmasks) {
+        NoteFaultImage(desc.GetSharp(stage));
+    }
+}
+
+void Rasterizer::NoteFaultTargets() {
+    const auto& regs = liverpool->regs;
+    constexpr u64 Meta = 8_MB;
+    for (const auto& cb : regs.color_buffers) {
+        if (!cb) {
+            continue;
+        }
+        // At most 16 bytes per element: an upper bound of a slice.
+        const u64 slice = u64(cb.slice.tile_max + 1) * 64 * 16 * cb.NumSamples();
+        NoteFaultRead(cb.Address(), slice * cb.NumSlices());
+        if (cb.CmaskAddress() != 0) {
+            NoteFaultRead(cb.CmaskAddress(), Meta);
+        }
+        if (cb.FmaskAddress() != 0) {
+            NoteFaultRead(cb.FmaskAddress(), Meta);
+        }
+    }
+    const auto& depth = regs.depth_buffer;
+    const u64 depth_slice = u64(depth.depth_slice.tile_max + 1) * 64 * 4 * depth.NumSamples();
+    const u64 depth_bytes = depth_slice * regs.depth_view.NumSlices();
+    for (const u64 address : {depth.DepthAddress(), depth.DepthWriteAddress(),
+                              depth.StencilAddress(), depth.StencilWriteAddress()}) {
+        if (address != 0) {
+            NoteFaultRead(address, depth_bytes);
+        }
+    }
+    if (const VAddr htile = regs.depth_htile_data_base.GetAddress(); htile != 0) {
+        NoteFaultRead(htile, Meta);
+    }
 }
 
 bool Rasterizer::ReadMemory(VAddr addr, u64 size, bool assume_locks) {

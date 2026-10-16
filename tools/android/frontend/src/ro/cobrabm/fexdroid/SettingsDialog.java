@@ -28,17 +28,63 @@ import java.util.Map;
 /** Graphics settings for the Thor, kept in bbport.ini (run-bionic.sh reads them at start: scene
  *  size, upscaler, the game's effect patches). Other lines and comments of the file are kept. */
 final class SettingsDialog {
-    /** The outputs offered (output_res; 720p when missing) and the presets: the scene size is the output
-     *  divided by the scale, rounded to even (run-bionic.sh and build_patch_parts.py use the same sizes). */
-    private static final String[] OUTPUT_VALUES={"1920x1080","1280x720","854x480"};
-    private static final String[] OUTPUT_NAMES={"1080p (1920×1080)","720p (1280×720)","480p (854×480)"};
-    private static final int[][] OUTPUT_SIZES={{1920,1080},{1280,720},{854,480}};
-    private static final int OUTPUT_DEFAULT=1;
+    /** The output sizes depend on the aspect ratio (aspect_ratio) and the display; see outputs(). Legacy
+     *  output_res values (1920x1080, 1280x720, 854x480) load as they are. 1080p (1080 lines at the chosen aspect ratio) is the default. */
+    private static final String[] ASPECT_VALUES={"auto","4:3","16:10","16:9","21:9","32:9"};
+    private static final double[] ASPECT_RATIOS={0,4/3.0,16/10.0,16/9.0,21/9.0,32/9.0};
+    private static final int ASPECT_DEFAULT=0, OUTPUT_DEFAULT_HEIGHT=1080;
+    private static final int[] OUTPUT_HEIGHTS={360,480,540,720,1080,1440};
     private static final String[] PRESET_NAMES={"Native","Quality","Balanced","Performance","Ultra performance"};
     private static final double[] PRESET_SCALES={1.0,1.5,1.7,2.0,3.0};
     private static int scene(int v,int preset) { return Math.max(2,(int)Math.rint(v/PRESET_SCALES[preset]/2)*2); }
-    private static String presetName(int output,int preset) {
-        return PRESET_NAMES[preset]+" ("+scene(OUTPUT_SIZES[output][0],preset)+"×"+scene(OUTPUT_SIZES[output][1],preset)+")";
+    private static String presetName(int[] output,int preset) {
+        return PRESET_NAMES[preset]+" ("+scene(output[0],preset)+"×"+scene(output[1],preset)+")";
+    }
+    /** The device's physical display in landscape, long side first (the game surface covers all of it,
+     *  cutout included: MainActivity lays the window out in the short-edge cutout area, immersive). */
+    static int[] displaySize(Activity activity) {
+        int w, h;
+        android.view.WindowManager wm=activity.getWindowManager();
+        if (android.os.Build.VERSION.SDK_INT>=30) {
+            android.graphics.Rect r=wm.getMaximumWindowMetrics().getBounds(); w=r.width(); h=r.height();
+        } else {
+            android.graphics.Point p=new android.graphics.Point(); wm.getDefaultDisplay().getRealSize(p); w=p.x; h=p.y;
+        }
+        return new int[]{Math.max(w,h),Math.min(w,h)};
+    }
+    /** The aspect (width/height) of an aspect_ratio value on a display; missing: auto; unknown values: 16:9. */
+    static double aspectOf(String value,int[] display) {
+        if (value==null || value.isEmpty()) value="auto";
+        for (int i=0;i<ASPECT_VALUES.length;++i) if (ASPECT_VALUES[i].equals(value))
+            return i==0 ? display[0]/(double)display[1] : ASPECT_RATIOS[i];
+        return 16/9.0;
+    }
+    /** "20:9" for a display's own ratio: the nearest simple ratio, else "2.13:1". */
+    private static String ratioName(int[] d) {
+        double r=d[0]/(double)d[1];
+        String[] names={"4:3","16:10","16:9","19.5:9","20:9","21:9","32:9"};
+        double[] values={4/3.0,1.6,16/9.0,19.5/9,20/9.0,21/9.0,32/9.0};
+        for (int i=0;i<names.length;++i) if (Math.abs(r/values[i]-1)<0.012) return names[i];
+        return String.format(Locale.ROOT,"%.2f:1",r);
+    }
+    /** The output sizes {w,h} for an aspect: index 0 is the display native one; then the heights no larger than
+     *  the display in either dimension (and the legacy 1080p at 16:9), widths = height x aspect, even. */
+    static List<int[]> outputs(double aspect,int[] display) {
+        List<int[]> list=new ArrayList<>();
+        list.add(new int[]{display[0]&~1,display[1]&~1});
+        List<Integer> heights=new ArrayList<>();
+        for (int h:OUTPUT_HEIGHTS) heights.add(h);
+        if (!heights.contains(display[1]&~1)) heights.add(display[1]&~1);
+        java.util.Collections.sort(heights);
+        for (int h:heights) {
+            int w=(int)Math.round(h*aspect/2)*2;
+            boolean legacy=h==1080 && w==1920;
+            if (!legacy && (w>display[0] || h>display[1])) continue;
+            boolean dup=false;
+            for (int[] o:list) if (o[0]==w && o[1]==h) dup=true;
+            if (!dup) list.add(new int[]{w,h});
+        }
+        return list;
     }
     private static final String[][] EFFECTS={
         {"effect_chromatic_aberration","Chromatic aberration","1"},
@@ -179,6 +225,17 @@ final class SettingsDialog {
         }
         return all ? "" : list.toString();
     }
+    private static int[] parseSize(String v) {
+        java.util.regex.Matcher m=java.util.regex.Pattern.compile("(\\d+)x(\\d+)").matcher(v==null ? "" : v.trim());
+        return m.matches() ? new int[]{Integer.parseInt(m.group(1)),Integer.parseInt(m.group(2))} : null;
+    }
+    private long totalMemory() {
+        try {
+            android.app.ActivityManager.MemoryInfo info=new android.app.ActivityManager.MemoryInfo();
+            ((android.app.ActivityManager)activity.getSystemService(Activity.ACTIVITY_SERVICE)).getMemoryInfo(info);
+            return info.totalMem;
+        } catch (Exception ex) { return 0; }
+    }
     private static int checkedIndex(RadioGroup g) {
         for (int i=0;i<g.getChildCount();++i) if (((RadioButton)g.getChildAt(i)).isChecked()) return i;
         return -1;
@@ -189,10 +246,57 @@ final class SettingsDialog {
         LinearLayout box=new LinearLayout(activity); box.setOrientation(LinearLayout.VERTICAL);
         box.setPadding(dp(24),dp(4),dp(24),dp(8));
 
+        final int[] display=displaySize(activity);
+        heading(box,"Aspect ratio");
+        String[] aspectNames={"Auto (display, "+ratioName(display)+")","4:3","16:10","16:9","21:9","32:9"};
+        final RadioGroup aspects=choices(box,aspectNames,indexOf(ASPECT_VALUES,get("aspect_ratio",""),ASPECT_DEFAULT));
+        TextView aspectNote=new TextView(activity); aspectNote.setTextSize(13); aspectNote.setAlpha(0.7f);
+        aspectNote.setText("16:9 is the game's own. Wider ratios show more of the scene at the sides; Auto fills the whole screen "
+            +"(the ratio of your display). Applies at the next start.");
+        box.addView(aspectNote);
         heading(box,"Output resolution");
-        final RadioGroup outputs=choices(box,OUTPUT_NAMES,indexOf(OUTPUT_VALUES,get("output_res",""),OUTPUT_DEFAULT));
-        TextView outputNote=new TextView(activity); outputNote.setTextSize(13); outputNote.setAlpha(0.7f);
-        outputNote.setText("Higher output looks sharper but costs more GPU time; the upscaler renders the scene smaller and fills it.");
+        final RadioGroup outputs=new RadioGroup(activity);
+        box.addView(outputs);
+        final List<int[]> sizes=new ArrayList<>();
+        final String[] wanted={get("output_res","1920x1080")}; // the saved value, then whatever is picked
+        final TextView outputNote=new TextView(activity); outputNote.setTextSize(13); outputNote.setAlpha(0.7f);
+        final long totalMem=totalMemory();
+        final boolean lowMemory=totalMem>0 && totalMem<10L*1024*1024*1024; // a "12 GB" phone reports about 10.5-11 GiB
+        final Runnable fillOutputs=() -> {
+            int[] prev=sizes.isEmpty() || checkedIndex(outputs)<0 ? null : sizes.get(checkedIndex(outputs));
+            boolean wasNative=prev!=null && checkedIndex(outputs)==0;
+            int keepHeight=prev!=null ? prev[1] : -1;
+            if (prev!=null) wanted[0]=wasNative ? "native" : prev[0]+"x"+prev[1];
+            List<int[]> list=outputs(aspectOf(ASPECT_VALUES[Math.max(0,checkedIndex(aspects))],display),display);
+            sizes.clear(); sizes.addAll(list);
+            outputs.removeAllViews();
+            int pick=-1;
+            if ("native".equals(wanted[0]) && prev==null) pick=0;
+            else if (prev==null || !wasNative) {
+                // Saved value (or last pick) still offered: keep it; else the same height, nearest.
+                int[] w=parseSize(wanted[0]);
+                if (w!=null) { keepHeight=w[1]; for (int i=1;i<list.size();++i) if (list.get(i)[0]==w[0] && list.get(i)[1]==w[1]) pick=i; }
+                if (pick<0 && keepHeight>0) { int best=Integer.MAX_VALUE; for (int i=1;i<list.size();++i) { int dd=Math.abs(list.get(i)[1]-keepHeight); if (dd<best) { best=dd; pick=i; } } }
+            } else pick=0;
+            if (pick<0) { for (int i=1;i<list.size();++i) if (list.get(i)[1]==OUTPUT_DEFAULT_HEIGHT) pick=i; }
+            if (pick<0) pick=0;
+            for (int i=0;i<list.size();++i) {
+                int[] o=list.get(i);
+                RadioButton b=new RadioButton(activity); b.setId(View.generateViewId()); b.setTextSize(15);
+                b.setText(i==0 ? "Display native ("+o[0]+"×"+o[1]+")" : o[1]+"p ("+o[0]+"×"+o[1]+")");
+                outputs.addView(b); if (i==pick) outputs.check(b.getId());
+            }
+        };
+        aspects.setOnCheckedChangeListener((g,id) -> fillOutputs.run());
+        fillOutputs.run();
+        final Runnable outputHint=() -> {
+            int[] o=sizes.get(Math.max(0,checkedIndex(outputs)));
+            String text="Higher output looks sharper but costs more GPU time; the upscaler renders the scene smaller and fills it. "
+                +"Outputs above 1080p use more memory. Applies at the next start.";
+            if ((o[1]>1080 || o[0]>1920) && lowMemory)
+                text+="\n\nThis device has under 12 GB of RAM: this output may run out of memory.";
+            outputNote.setText(text);
+        };
         box.addView(outputNote);
         heading(box,"Upscaling");
         final RadioGroup upscalers=choices(box,UPSCALER_NAMES,indexOf(UPSCALER_VALUES,get("upscaler","fsr3"),1));
@@ -213,15 +317,18 @@ final class SettingsDialog {
         final TextView presetNote=new TextView(activity); presetNote.setTextSize(13); presetNote.setAlpha(0.7f);
         box.addView(presetNote);
         RadioGroup.OnCheckedChangeListener upscaling=(g,id) -> {
-            int upscaler=checkedIndex(upscalers), output=Math.max(0,checkedIndex(outputs));
+            int upscaler=checkedIndex(upscalers);
+            int[] output=sizes.get(Math.max(0,checkedIndex(outputs)));
             boolean on=upscaler!=0;
-            ((RadioButton)upscalers.getChildAt(0)).setText("Off (render at "+OUTPUT_SIZES[output][0]+"×"+OUTPUT_SIZES[output][1]+")");
+            outputHint.run();
+            ((RadioButton)upscalers.getChildAt(0)).setText("Off (render at "+output[0]+"×"+output[1]+")");
             for (int i=0;i<presets.getChildCount();++i) ((RadioButton)presets.getChildAt(i)).setText(presetName(output,i));
             for (int i=0;i<presets.getChildCount();++i) presets.getChildAt(i).setEnabled(on);
             frameGen.setEnabled(upscaler==FSR3 && !lossless);
             presetNote.setText(on ? "Lower is faster; the upscaler fills the screen." : "Without upscaling the game renders at the output resolution.");
         };
         upscalers.setOnCheckedChangeListener(upscaling); outputs.setOnCheckedChangeListener(upscaling);
+        aspects.setOnCheckedChangeListener((g,id) -> { fillOutputs.run(); upscaling.onCheckedChanged(upscalers,0); });
         upscaling.onCheckedChanged(upscalers,0);
 
         heading(box,"Image");
@@ -283,7 +390,9 @@ final class SettingsDialog {
             .setNegativeButton("Cancel",null)
             .setPositiveButton("Apply & restart",(d,w) -> {
                 Map<String,String> changed=new LinkedHashMap<>();
-                changed.put("output_res",OUTPUT_VALUES[Math.max(0,checkedIndex(outputs))]);
+                int outIndex=Math.max(0,checkedIndex(outputs)); int[] out=sizes.get(outIndex);
+                changed.put("aspect_ratio",ASPECT_VALUES[Math.max(0,checkedIndex(aspects))]);
+                changed.put("output_res",outIndex==0 ? "native" : out[0]+"x"+out[1]);
                 changed.put("upscaler",UPSCALER_VALUES[Math.max(0,checkedIndex(upscalers))]);
                 changed.put("fps_limit",FPS_VALUES[Math.max(0,checkedIndex(fpsLimit))]);
                 changed.put("frame_generation",frameGen.isChecked() && checkedIndex(upscalers)!=0 && !lossless ? "1" : "0");
