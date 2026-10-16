@@ -43,8 +43,8 @@ final class AudioBridge {
                 try { Os.fcntlInt(fd,F_SETPIPE_SZ,8192); } catch (Exception ignored) {}
                 int min=AudioTrack.getMinBufferSize(RATE,AudioFormat.CHANNEL_OUT_STEREO,AudioFormat.ENCODING_PCM_16BIT);
                 AudioTrack t=new AudioTrack.Builder()
-                    .setAudioAttributes(new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_GAME)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build())
+                    .setAudioAttributes(captureAll(new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_GAME)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)).build())
                     .setAudioFormat(new AudioFormat.Builder().setSampleRate(RATE)
                         .setEncoding(AudioFormat.ENCODING_PCM_16BIT).setChannelMask(AudioFormat.CHANNEL_OUT_STEREO).build())
                     .setBufferSizeInBytes(Math.max(min,RATE*FRAME/20))
@@ -67,5 +67,11 @@ final class AudioBridge {
     }
     private static boolean isFifo(File file) {
         try { return OsConstants.S_ISFIFO(Os.stat(file.getPath()).st_mode); } catch (Exception e) { return false; }
+    }
+
+    /** Screen recorders may capture the game's sound (Android 10+; the manifest allows it for the app). */
+    private static AudioAttributes.Builder captureAll(AudioAttributes.Builder b) {
+        if (android.os.Build.VERSION.SDK_INT>=29) b.setAllowedCapturePolicy(AudioAttributes.ALLOW_CAPTURE_BY_ALL);
+        return b;
     }
 }

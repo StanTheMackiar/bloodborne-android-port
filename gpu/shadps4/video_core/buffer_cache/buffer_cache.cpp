@@ -549,15 +549,17 @@ std::optional<u32> FindMemoryType(const vk::PhysicalDeviceMemoryProperties& prop
     return std::nullopt;
 }
 
-/// bbport: arenas without sparse binding (plain buffers that own their memory) where the driver has
-/// no sparse buffers: PanVK on Mali with kbase reports sparseBinding = sparseResidencyBuffer =
-/// false. BB_NONSPARSE_ARENAS=1/0 forces it on/off on any GPU (tests).
+/// bbport: arenas without sparse binding (plain buffers that own their memory) wherever the driver
+/// has no sparse buffers: PanVK on Mali with kbase, and Turnip on Adreno 6xx such as the 650 (it
+/// reports sparseBinding = sparseResidencyBuffer = 0 yet creates sparse buffers, and the first
+/// vkQueueBindSparse lost the device: GitHub issue #10). BB_NONSPARSE_ARENAS=1/0 forces it on/off
+/// on any GPU (tests).
 static bool WantNonSparseArenas(const Vulkan::Instance& instance) {
     const char* env = std::getenv("BB_NONSPARSE_ARENAS");
     if (env && *env) {
         return env[0] != '0';
     }
-    return instance.IsMali() && !instance.HasSparseBuffers();
+    return !instance.HasSparseBuffers();
 }
 
 BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
@@ -645,7 +647,7 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
         std::printf("GPU limits: maxMemoryAllocationSize=%llu maxBufferSize=%llu\n",
                     static_cast<unsigned long long>(m3.maxMemoryAllocationSize),
                     static_cast<unsigned long long>(m4.maxBufferSize));
-        std::printf("Buffer cache: no sparse binding (Mali/PanVK or BB_NONSPARSE_ARENAS=1): arenas "
+        std::printf("Buffer cache: no sparse binding (the driver has none, or BB_NONSPARSE_ARENAS=1): arenas "
                     "of %llu MiB backed when created\n",
                     static_cast<unsigned long long>(arena_page_size >> 20));
     }

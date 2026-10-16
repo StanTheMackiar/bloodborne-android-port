@@ -37,7 +37,7 @@ bool ComputeWriteTracking();
 } // namespace Detail
 
 /// bbport: the buffer cache's arenas are plain buffers with their own memory (no sparse binding):
-/// the driver has none (PanVK on Mali with kbase), or BB_NONSPARSE_ARENAS=1. Set by the BufferCache
+/// the driver has none (PanVK on Mali, Turnip on Adreno 6xx), or BB_NONSPARSE_ARENAS=1. Set by the BufferCache
 /// at construction; the in-place modes (sparse arena bound to guest memory chunks) are off then.
 inline bool NonSparseArenas() {
     return Detail::non_sparse_arenas.load(std::memory_order_relaxed);
