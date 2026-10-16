@@ -343,6 +343,42 @@ public final class ModsTest {
         });
     }
 
+    // ---------------------------------------------------------------- MemoryBudget
+
+    static void memoryBudgetTests() {
+        test("memory_budget_by_ram", () -> {
+            long gib = MemoryBudget.GIB_KB;
+            // MemTotal as phones report it: 16 GB ~15.2 GB, 12 GB (Poco F7 Pro) 11367156 kB, 8 GB ~7.5 GB.
+            MemoryBudget big = MemoryBudget.forMemTotal(15_900_000), twelve = MemoryBudget.forMemTotal(11_367_156);
+            eq(4096L, big.textureMb); eq(0L, big.vramMb); // as before: run-bionic.sh's and the driver's own
+            eq(list("BB_GC_BUDGET_MB=4096"), Arrays.asList(big.environment()));
+            eq(2048L, twelve.textureMb); eq(2048L, twelve.vramMb);
+            eq(list("BB_GC_BUDGET_MB=2048", "BB_VRAM_LIMIT_MB=2048"), Arrays.asList(twelve.environment()));
+            eq(1536L, MemoryBudget.forMemTotal(7_600_000).vramMb);
+            eq(1024L, MemoryBudget.forMemTotal(5_700_000).vramMb);
+            eq(0L, MemoryBudget.forMemTotal(0).vramMb); eq(4096L, MemoryBudget.forMemTotal(0).textureMb); // unknown
+            eq(0L, MemoryBudget.forMemTotal(14 * gib).vramMb); eq(2048L, MemoryBudget.forMemTotal(14 * gib - 1).vramMb);
+            eq(2048L, MemoryBudget.forMemTotal(10 * gib).vramMb); eq(1536L, MemoryBudget.forMemTotal(10 * gib - 1).vramMb);
+            eq("Memory: 10.8 GB RAM: a 12 GB phone -> textures 2048 MB, GPU memory taken as 2048 MB", twelve.logLine());
+            eq("Memory: 15.2 GB RAM: the default budget -> textures 4096 MB, GPU memory as the driver reports", big.logLine());
+        });
+        test("memory_budget_set_by_hand", () -> {
+            MemoryBudget set = MemoryBudget.choose(11_367_156, " 3000 ");
+            eq(3000L, set.textureMb); eq(3000L, set.vramMb); contains(set.logLine(), "10.8 GB RAM: set in bbport.ini");
+            eq(3000L, MemoryBudget.choose(15_900_000, "3000").vramMb); // by hand on a 16 GB phone too
+            for (String bad : new String[]{null, "", "abc", "100", "99999"}) eq(2048L, MemoryBudget.choose(11_367_156, bad).vramMb);
+        });
+        test("memory_budget_reads_meminfo", () -> {
+            eq(11367156L, MemoryBudget.memTotalKb("MemTotal:       11367156 kB\nMemFree:           18132 kB\n"));
+            eq(0L, MemoryBudget.memTotalKb("MemFree: 1 kB\n"));
+            eq(0L, MemoryBudget.memTotalKb("MemTotal: lots kB\n"));
+            File f = new File(temp(), "meminfo");
+            try { write(f, "MemTotal:        7600000 kB\n"); eq(7600000L, MemoryBudget.memTotalKb(f)); }
+            finally { delete(f.getParentFile()); }
+            eq(0L, MemoryBudget.memTotalKb(new File("/nonexistent/meminfo")));
+        });
+    }
+
     // ---------------------------------------------------------------- MovieSkip
 
     interface WithMovieGame { void run(File root, File game, File out) throws Exception; }
@@ -1108,7 +1144,7 @@ public final class ModsTest {
     }
 
     public static void main(String[] args) {
-        modsAndroidTests(); modsPyTests(); sfoTests(); installPkgTests(); installGameTests(); gameCheckTests(); movieSkipTests(); realTests();
+        modsAndroidTests(); modsPyTests(); sfoTests(); installPkgTests(); installGameTests(); gameCheckTests(); movieSkipTests(); memoryBudgetTests(); realTests();
         System.exit(T.finish());
     }
 }

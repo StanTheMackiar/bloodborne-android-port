@@ -1130,6 +1130,11 @@ public final class MainActivity extends Activity {
                 if (auto.notice!=null && !autoNoticeShown) { autoNoticeShown=true; main.post(() -> { if (!destroyed) toast(auto.notice); }); }
                 main.post(() -> { if (!destroyed && drawerOpen) refreshDrawer(); });
             } else autoLine=null;
+            // The GPU memory budget for this phone's RAM (MemoryBudget): GPU memory is system RAM here.
+            MemoryBudget memory=MemoryBudget.choose(MemoryBudget.memTotalKb(new File("/proc/meminfo")),setting("gpu_memory_budget_mb"));
+            java.util.Collections.addAll(extra,memory.environment());
+            modsLog.add(memory.logLine());
+            android.util.Log.i("Bloodborne",memory.logLine());
             // The surface's size in pixels: the present target of libbbgpu (BB_SCREEN_W/H).
             int w=surface.getWidth(), h=surface.getHeight();
             extra.add("BB_SCREEN_W="+(w>0 ? w : 1280)); extra.add("BB_SCREEN_H="+(h>0 ? h : 720));
