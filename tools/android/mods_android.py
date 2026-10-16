@@ -309,7 +309,9 @@ def read_pkg(path):
                 raise Failure('This PKG file is incomplete')
             info = {'contentId': head[0x40:0x64].split(b'\0')[0].decode('ascii', 'replace'),
                     'contentType': struct.unpack_from('>I', head, 0x74)[0],
-                    'size': struct.unpack_from('>Q', head, 0x430)[0], 'sfo': None}
+                    'size': struct.unpack_from('>Q', head, 0x430)[0], 'sfo': None,
+                    'pfsOffset': struct.unpack_from('>Q', head, 0x410)[0],
+                    'pfsSize': struct.unpack_from('>Q', head, 0x418)[0]}
             if info['size'] > file_size:
                 raise Failure('This PKG file is incomplete (the download or copy was cut short)')
             count, table = struct.unpack_from('>I', head, 0x10)[0], struct.unpack_from('>I', head, 0x18)[0]
@@ -331,6 +333,60 @@ def read_pkg(path):
     except OSError as error:
         raise Failure(f"Can't read the PKG: {error.strerror or error}")
     return info
+
+
+# The PFS image is encrypted and never holds zeros past its header (whose zero pages end before 0x50000). A run of
+# zeros there is a part of the file that was never written: a download manager makes the file at full size and leaves
+# the pieces that never arrived as zeros, so the size check passes and the tool unpacks those files as zeros or noise
+# without an error (the game then hangs on a black screen). One 64 KiB probe every 8 MiB past the first MiB; two empty
+# probes in a row (8 MiB of zeros or more) mean missing pieces, so a gap of 16 MiB or more is always found.
+DATA_SKIP, DATA_STEP, DATA_PROBE, DATA_PROGRESS_EVERY = MIB, 8 * MIB, 64 << 10, 128
+DATA_LABEL = 'Checking the PKG'
+
+
+def empty_data(path, info):
+    """Bytes of the PKG's PFS image its probes found empty (8 MiB per probe in runs of two or more), 0 when none or
+    when the header names no PFS image inside the file. Progress DATA_LABEL while it reads, only when it reads."""
+    start, end = info['pfsOffset'] + DATA_SKIP, info['pfsOffset'] + info['pfsSize']
+    if info['pfsOffset'] <= 0 or info['pfsSize'] <= DATA_SKIP + DATA_PROBE or end > info['size'] or end >= 1 << 63:
+        return 0
+    probes = (end - DATA_PROBE - start) // DATA_STEP + 1
+    total = probes * DATA_PROBE
+    progress(0, total, DATA_LABEL)
+    empty = run = 0
+    zeros = bytes(DATA_PROBE)
+    try:
+        with open(path, 'rb') as file:
+            for i in range(probes):
+                file.seek(start + i * DATA_STEP)
+                block = file.read(DATA_PROBE)
+                if len(block) < DATA_PROBE:
+                    raise OSError(5, 'Input/output error')
+                if block == zeros:
+                    run += 1
+                else:
+                    if run >= 2:
+                        empty += run * DATA_STEP
+                    run = 0
+                if (i + 1) % DATA_PROGRESS_EVERY == 0 and i + 1 < probes:
+                    progress((i + 1) * DATA_PROBE, total, DATA_LABEL)
+    except OSError as error:
+        raise Failure(f"Can't read the PKG: {error.strerror or error}")
+    if run >= 2:
+        empty += run * DATA_STEP
+    progress(total, total, DATA_LABEL)
+    return empty
+
+
+def check_data(path, info):
+    """Failure when the PKG has empty parts (empty_data): before the tool spends minutes unpacking them as zeros."""
+    empty = empty_data(path, info)
+    if not empty:
+        return
+    print(f'PKG data check: about {empty // MIB} MiB of the PFS image are zeros', file=sys.stderr, flush=True)
+    size = gigabytes(empty) if empty >= 100 * MIB else f'{empty // MIB} MB'
+    raise Failure(f'This PKG file is damaged: about {size} of it are empty (zeros), as when parts of a download '
+                  'never arrived. Download it again.')
 
 
 def free_space(path):
@@ -487,6 +543,7 @@ def install_pkg(args, state):
     need = info['size'] + MOD_MARGIN
     if free_space(mods_dir) < need:
         raise Failure(f'Not enough free space: {gigabytes(need)} needed, {gigabytes(free_space(mods_dir))} available')
+    check_data(pkg, info)
     staging = state['staging'] = new_staging(mods_dir)
     run_tool(args.tool, pkg, staging, MOD_MARGIN, mods_dir)
     progress(0, 0, 'Checking')
@@ -650,6 +707,7 @@ def install_game(args, state, result):
     need = info['size'] + GAME_MARGIN
     if free_space(parent) < need:
         raise Failure(f'Not enough free space: {gigabytes(need)} needed, {gigabytes(free_space(parent))} available')
+    check_data(pkg, info)
     staging = state['staging'] = new_staging(parent)
     run_tool(args.tool, pkg, staging, GAME_MARGIN, parent)
     progress(0, 0, 'Installing')

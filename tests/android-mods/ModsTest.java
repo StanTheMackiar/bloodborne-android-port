@@ -429,6 +429,20 @@ public final class ModsTest {
         return body;
     }
     static File makePkgFile(File path, String contentId, byte[] sfo) throws IOException { write(path, makePkg(contentId, sfo)); return path; }
+    /** A PKG with a PFS image of `size` bytes of noise (as encrypted data is) after `makePkg`'s header, its first
+     *  0x50000 bytes zero as a real PFS header's are, and zeros at each [at, at + length) pair of `zeros` (offsets
+     *  in the image). */
+    static File makeDataPkgFile(File path, byte[] sfo, int size, int... zeros) throws IOException {
+        byte[] head = makePkg("EP9000-CUSA03173_00-BLOODBORNE0000EU", sfo, 0);
+        int pfs = (head.length + 0xffff) & ~0xffff;
+        byte[] body = Arrays.copyOf(head, pfs + size);
+        java.util.Random noise = new java.util.Random(7);
+        for (int i = pfs + 0x50000; i < body.length; ++i) body[i] = (byte)(1 + noise.nextInt(255));
+        for (int i = 0; i < zeros.length; i += 2) Arrays.fill(body, pfs + zeros[i], pfs + zeros[i] + zeros[i + 1], (byte)0);
+        ByteBuffer.wrap(body).order(ByteOrder.BIG_ENDIAN).putLong(0x410, pfs).putLong(0x418, size).putLong(0x430, body.length);
+        write(path, body);
+        return path;
+    }
     static File makePkgFile(File path, byte[] sfo) throws IOException { return makePkgFile(path, "EP9000-CUSA03173_00-BLOODBORNE0000EU", sfo); }
 
     /** A shell script standing in for ps4-pkg-tool; what it does is in the plan folder beside it. */
@@ -572,6 +586,14 @@ public final class ModsTest {
             p.tool.plan(goodFiles("sce_module/new.prx", "new"));
             contains(installMod(p, "M3").problem, "sce_module/new.prx");
             eq(list("Mod"), names(p.mods));
+        });
+        pkg("pkg_with_empty_parts_refused_before_unpacking", p -> {
+            Setup.game(p);
+            makeDataPkgFile(p.pkg, sfo("TITLE_ID", "CUSA03173", "APP_VER", "01.09", "CATEGORY", "gp"), 24 << 20, 8 << 20, 16 << 20);
+            p.tool.plan(goodFiles());
+            PkgInstaller.ModResult r = installMod(p, "Mod");
+            no(r.ok); contains(r.problem, "This PKG file is damaged: about 16 MB of it are empty (zeros)");
+            eq(0, p.tool.runs()); eq(0, names(p.mods).size());
         });
         pkg("pkg_eboot_needs_the_game_folder", p -> {
             Setup.game(p);
@@ -722,6 +744,40 @@ public final class ModsTest {
             long total = 0; for (String v : files.values()) total += v.getBytes(StandardCharsets.ISO_8859_1).length;
             yes(g.p.progress.contains("progress 0 " + total + " Installing"), g.p.progress.toString());
             yes(g.p.progress.contains("progress " + total + " " + total + " Installing"), g.p.progress.toString());
+        });
+        gamePkg("game_pkg_with_empty_parts_refused_before_unpacking", g -> {
+            byte[] base = sfo("TITLE_ID", "CUSA03173", "APP_VER", "01.00", "CATEGORY", "gd");
+            makeDataPkgFile(g.base, base, 40 << 20, 10 << 20, 20 << 20); // a 20 MiB gap, as a download leaves it
+            g.p.tool.plan(g.baseFiles());
+            PkgInstaller.GameResult r = g.install(g.base);
+            no(r.ok); eq(null, r.gameDir); eq(0, g.p.tool.runs());
+            eq("This PKG file is damaged: about 16 MB of it are empty (zeros), as when parts of a download never arrived. "
+                + "Download it again.", r.problem);
+            long total = ((40L << 20) - (1 << 20) - (64 << 10)) / (8 << 20) * (64 << 10) + (64 << 10);
+            eq(list("progress 0 " + total + " Checking the PKG", "progress " + total + " " + total + " Checking the PKG"), g.p.progress);
+            contains(String.join("\n", g.p.log), "PKG data check: about 16 MiB of the PFS image are zeros");
+            eq(0, names(g.dest).size());
+            // A gap at the end of the image counts the same.
+            makeDataPkgFile(g.base, base, 40 << 20, 24 << 20, 16 << 20);
+            contains(g.install(g.base).problem, "empty (zeros)");
+            eq(0, g.p.tool.runs());
+        });
+        gamePkg("game_pkg_data_check_passes_intact_data", g -> {
+            byte[] base = sfo("TITLE_ID", "CUSA03173", "APP_VER", "01.00", "CATEGORY", "gd");
+            // The header's zero pages and a lone empty 64 KiB block (one probe) are not missing pieces.
+            makeDataPkgFile(g.base, base, 40 << 20, (1 << 20) + (8 << 20), 64 << 10);
+            g.p.tool.plan(g.baseFiles());
+            PkgInstaller.GameResult r = g.install(g.base);
+            yes(r.ok, String.valueOf(r.problem)); eq(1, g.p.tool.runs());
+            yes(g.p.progress.contains("progress 0 327680 Checking the PKG"), g.p.progress.toString());
+            yes(g.p.progress.indexOf("progress 327680 327680 Checking the PKG") < g.p.progress.indexOf("progress 0 100 Extracting"), g.p.progress.toString());
+            eq(PkgInstaller.emptyData(g.base, PkgInstaller.readPkg(g.base), (d, t, l) -> {}, NEVER), 0L);
+        });
+        gamePkg("game_pkg_data_check_cancels", g -> {
+            makeDataPkgFile(g.base, sfo("TITLE_ID", "CUSA03173", "APP_VER", "01.00", "CATEGORY", "gd"), 40 << 20);
+            try { g.p.installer.installGame(g.base, g.dest, false, g.p.sink(), () -> true); throw new AssertionError("not cancelled"); }
+            catch (CancellationException expected) {}
+            eq(0, g.p.tool.runs()); eq(0, names(g.dest).size());
         });
         gamePkg("game_update_without_game", g -> {
             g.p.tool.plan(g.updateFiles());

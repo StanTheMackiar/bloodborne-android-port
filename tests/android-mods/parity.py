@@ -197,6 +197,38 @@ def real(root):
     print('real install-game:', results[1][1])
 
 
+def damaged_pkg(root):
+    """install-game of a PKG whose PFS image has a 20 MiB gap of zeros (pieces of a download that never arrived):
+    refused before the tool runs, with the same progress and result from both."""
+    import random
+    import struct
+    sfo = make_sfo({'TITLE_ID': 'CUSA03173', 'APP_VER': '01.00', 'CATEGORY': 'gd'})
+    head = bytearray(0x440)
+    head[:4] = b'\x7fCNT'
+    head[0x40:0x40 + 36] = b'EP9000-CUSA03173_00-BLOODBORNE0000EU'
+    struct.pack_into('>I', head, 0x74, 0x1a)
+    struct.pack_into('>II', head, 0x10, 1, 0x440)
+    entry = bytearray(32)
+    struct.pack_into('>I', entry, 0, 0x1000)
+    struct.pack_into('>II', entry, 16, 0x440 + 32, len(sfo))
+    body = head + entry + sfo
+    pfs, size = (len(body) + 0xffff) & ~0xffff, 40 << 20
+    image = bytearray(random.Random(7).randbytes(size).replace(b'\0', b'\1'))
+    image[:0x50000] = bytes(0x50000)
+    image[10 << 20:30 << 20] = bytes(20 << 20)
+    data = body + bytes(pfs - len(body)) + image
+    struct.pack_into('>QQ', data, 0x410, pfs, size)
+    struct.pack_into('>Q', data, 0x430, len(data))
+    pkg = root / 'damaged.pkg'
+    pkg.write_bytes(data)
+    results = []
+    for runner, label in ((run_py, 'py'), (run_java, 'java')):
+        out, _ = runner('install-game', '--pkg', pkg, '--dest', root / f'damaged-{label}', '--tool', root / 'no-tool')
+        results.append(last_json(out))
+    check('damaged pkg install-game json', results[0][1], results[1][1])
+    check('damaged pkg install-game progress', results[0][0], results[1][0])
+
+
 def main():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -252,6 +284,7 @@ def main():
         py_run, py_err = run_py('apply', '--game', game, '--out', game, '--mods-dir', mods, '--config', root / 'missing.json')
         java_run, java_err = run_java('apply', '--game', game, '--out', game, '--mods-dir', mods, '--config', root / 'missing.json')
         check('apply refuses to clear the game', [py_run.strip(), mods_lines(py_err)], [java_run.strip(), mods_lines(java_err)])
+        damaged_pkg(root)
         real(root)
     print(f'parity: {len(failures)} difference(s)')
     return 1 if failures else 0
