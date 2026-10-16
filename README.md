@@ -63,10 +63,6 @@ flowchart LR
 - **Vulkan driver**: the game process opens the driver library itself, without Android's Vulkan loader, so it can use a Mesa driver that ships inside the APK and is picked for your GPU (see [GPU drivers](#gpu-drivers)), or the phone's own driver through the system loader.
 - **The Android app**: menu, settings, on-screen controller, mods, PKG installers and game preparation (`bb-prepare` checks the game files and builds the image the game runs from; the settings' game patches are compiled at build time and chosen at each start).
 
-**How the pieces talk:** the app starts the game process with a small launch script that turns the settings into environment variables. The renderer draws each finished frame into an Android hardware buffer (AHardwareBuffer) and hands it to the app over a local socket together with a sync fence, and the app puts it on the screen with SurfaceControl: no copy, and with VSync on, every frame stays up for at least one refresh. Sound goes from the game's mixer to the app's AudioTrack through a pipe, and controller and touch input go the other way through a small pad-state file. Settings that change while you play (cheats, frame generation) are small state files the game process watches.
-
-FEXCore runs in its fastest mode (no x86 memory-ordering emulation, reduced x87 precision). The PC build has no translation layer at all: there, the game's x86-64 code runs directly on the CPU.
-
 ## Features
 
 - **Native Android program** — new in 0.9.0: no Linux system on the phone any more; the APK is about 37 MB and frames go straight to the screen
