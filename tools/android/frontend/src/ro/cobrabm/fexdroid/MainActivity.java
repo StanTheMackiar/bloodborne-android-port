@@ -73,9 +73,7 @@ public final class MainActivity extends Activity {
     private final AtomicBoolean gpuProbing=new AtomicBoolean();
     private ModsDialog mods;
     private GameInstaller installer;
-    private AppUpdater updater;
     private ReportDialog report;
-    private LinearLayout updateItem;
     /** Runs when the Lossless.dll picker returns (the graphics settings show the new state). */
     private Runnable dllDone;
     private boolean drawerOpen, startingDisplay, hadError, swipeConsumed;
@@ -90,15 +88,7 @@ public final class MainActivity extends Activity {
         drivers=new DriverManager(new File(FILES));
         GameInstaller.Host host=modsHost();
         mods=new ModsDialog(this,host); installer=new GameInstaller(this,host);
-        updater=new AppUpdater(this,new AppUpdater.Host() {
-            @Override public void stopGame() { MainActivity.this.stopGame(); }
-            @Override public void restartGame() { if (!destroyed && displayReady) MainActivity.this.restartGame(); }
-            @Override public void detail(String text) { setDetail(updateItem,text); }
-            @Override public void closed() { if (!destroyed) immersive(); }
-            @Override public boolean destroyed() { return destroyed; }
-        });
         report=new ReportDialog(this,reportHost());
-        worker.execute(updater::cleanup); // downloads an earlier run left
         gameDir=getSharedPreferences("bloodborne",MODE_PRIVATE).getString("game_dir",null);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         if (Build.VERSION.SDK_INT>=28) {
@@ -249,7 +239,8 @@ public final class MainActivity extends Activity {
             .setNegativeButton("Cancel",null).setPositiveButton("Quit",(dialog,which) -> finish()).show());
 
         section("App");
-        updateItem=menuItem("ic_refresh","Check for updates","Version "+updater.version(),() -> updater.check());
+        // No "Check for updates" in this fork: it installs upstream's releases, signed with another key, which Android
+        // refuses over this build (and would drop this fork's changes). The version is pinned under the menu.
         menuItem("ic_bug_report","Report a problem","Save logs for a GitHub issue",() -> { closeDrawer(); report.show(); });
         menuItem("ic_tune","Debug options","Performance switches for testing",() -> {
             closeDrawer();
@@ -449,7 +440,6 @@ public final class MainActivity extends Activity {
     }
     @Override protected void onResume() {
         super.onResume(); if (audio!=null) audio.resume();
-        if (updater!=null) updater.resumed(); // back from the "install unknown apps" setting
     }
     @Override protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
@@ -1205,7 +1195,7 @@ public final class MainActivity extends Activity {
         if (p!=null) { p.destroyForcibly(); try { p.waitFor(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); } }
     }
     @Override protected void onDestroy() {
-        destroyed=true; if (driverDownload!=null) driverDownload.close(); if (mods!=null) mods.close(); if (installer!=null) installer.close(); if (updater!=null) updater.close(); pad.reset(); audio.stop(); main.removeCallbacksAndMessages(null);
+        destroyed=true; if (driverDownload!=null) driverDownload.close(); if (mods!=null) mods.close(); if (installer!=null) installer.close(); pad.reset(); audio.stop(); main.removeCallbacksAndMessages(null);
         stopGame();
         worker.shutdownNow(); super.onDestroy();
     }
