@@ -65,6 +65,7 @@ flowchart LR
 
 ## Features
 
+- **Real game speed when the frame rate drops** — new in 0.9.1: frame-rate hooks from bloodborne_pc replace the 60 FPS patches, and the game keeps its speed down to 20 FPS instead of slowing below 30 ([Game speed](#default-settings-and-performance))
 - **Native Android program** — new in 0.9.0: no Linux system on the phone any more; the APK is about 37 MB and frames go straight to the screen
 - **GPU driver picked for you** — new in 0.9.0: Turnip for Adreno 6xx/7xx and 8xx and PanVK for Mali ship inside the APK ([GPU drivers](#gpu-drivers))
 - **Output resolution** (1080p, 720p or 480p) with **FSR 3.1** upscaling presets relative to it, and a **VSync** option — new in 0.9.0
@@ -113,7 +114,7 @@ On ColorOS / OxygenOS (Oppo, OnePlus) a "Security warning" about a malicious app
 Swipe in from the left edge (or press Back) to open the menu. Its sections:
 
 - **Game:** resume, Game settings, Cheats, Mods, restart.
-- **Graphics:** graphics settings (output resolution, upscaler and preset, VSync, FPS limit, model detail, effects), Frame generation (Lossless Scaling, applies at once) and the GPU driver.
+- **Graphics:** graphics settings (output resolution, upscaler and preset, VSync, FPS limit, keeping the game's speed when the frame rate drops, model detail, effects), Frame generation (Lossless Scaling, applies at once) and the GPU driver.
 - **Controls:** turn the on-screen controller on or off; edit its layout (move, resize or reset the buttons). With the controller on, drag anywhere outside the buttons to turn the camera.
 - **Storage:** choose the game folder, back up and restore saves, quit.
 - **App:** report a problem, check for updates (installing one closes the game, so save first).
@@ -135,6 +136,8 @@ The **output resolution** (1080p, 720p or 480p) is the size of the final picture
 | 480p | 854×480 | 570×320 | 502×282 | 428×240 | 284×160 |
 
 FSR 3.1 runs at the output size, so 1080p costs more GPU time than 720p. **VSync** (off by default) shows every frame for at least one screen refresh, in order: smoother pacing for a little more latency (best on Android 12+; pick an FPS limit that divides the refresh rate).
+
+**Game speed.** The game steps its world by a fixed 1/30 s and runs in slow motion below 30 FPS. Hooks in its code (ported from [bloodborne_pc](https://github.com/deadinside28/bloodborne_pc), set at load; every spot is checked, and the community Uncap FPS++ patch is the fallback if one differs) give it each frame's real time instead, so it keeps its speed at any FPS limit. **Keep game speed when FPS drops** (on by default) extends that down to 20 FPS (a step of up to 50 ms); off, the game slows down below 30 FPS. Turn it off if physics or animations misbehave in a heavy scene.
 
 ## GPU drivers
 

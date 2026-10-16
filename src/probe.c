@@ -463,6 +463,9 @@ int main(int argc, char **argv) {
     const char *content_profile=NULL, *app0=NULL, *user_dir=NULL;
     /* --patches may repeat (the Thor's settings choose pre-compiled parts): applied in order. */
     const char *patch_files[64]; int patch_count=0;
+    /* --fallback-patches may repeat: applied after the others only when the frame rate hooks did
+     * not install (bbgpu_frame_hooks_installed: a site of the game's code differs, or they are off). */
+    const char *fallback_files[8]; int fallback_count=0;
     for (int i = 2; i < argc; ++i) {
         if (!strcmp(argv[i], "--cpu-only")) cpu_only = 1;
         else if (!strcmp(argv[i], "--strict-imports")) strict_imports = 1;
@@ -473,11 +476,15 @@ int main(int argc, char **argv) {
             if (patch_count==(int)(sizeof(patch_files)/sizeof(patch_files[0]))) fail("too many patch files");
             patch_files[patch_count++]=argv[++i];
         }
+        else if (!strcmp(argv[i], "--fallback-patches") && i+1<argc) {
+            if (fallback_count==(int)(sizeof(fallback_files)/sizeof(fallback_files[0]))) fail("too many fallback patch files");
+            fallback_files[fallback_count++]=argv[++i];
+        }
         else if (!strcmp(argv[i], "--timeout") && i+1<argc) timeout_seconds=(unsigned)strtoul(argv[++i],NULL,10);
         else { fprintf(stderr, "Unknown option: %s\n", argv[i]); return 1; }
     }
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s boot.bin [--cpu-only] [--strict-imports] [--content-profile file] [--app0 dir] [--user dir] [--patches file]... [--timeout seconds] | --vulkan-only\n", argv[0]);
+        fprintf(stderr, "Usage: %s boot.bin [--cpu-only] [--strict-imports] [--content-profile file] [--app0 dir] [--user dir] [--patches file]... [--fallback-patches file]... [--timeout seconds] | --vulkan-only\n", argv[0]);
         return 1;
     }
     if (content_profile) {
@@ -663,7 +670,13 @@ int main(int argc, char **argv) {
         memcpy(image + relocs[i].target, &value, 8);
     }
     for (int i=0;i<patch_count;++i) apply_patches(patch_files[i], segments, ns, relocs, nr);
-    if (!cpu_only) bbgpu_patch_image(image, size);
+    if (!cpu_only) {
+        bbgpu_patch_image(image, size);
+        if (fallback_count && !bbgpu_frame_hooks_installed()) {
+            printf("Frame rate: hooks not installed: the fallback patches (the game's frame rate patch) apply\n");
+            for (int i=0;i<fallback_count;++i) apply_patches(fallback_files[i], segments, ns, relocs, nr);
+        }
+    }
     protect(traps, round_page((import_count + 1) * 32), 5);
     protect(image, round_page(size), 0);
     int executable_entry = 0;

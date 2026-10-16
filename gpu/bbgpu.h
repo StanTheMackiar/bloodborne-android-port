@@ -36,6 +36,9 @@ typedef struct { float x, y; uint32_t buttons; int focused; } BbMouseState;
 void bbgpu_mouse_state(BbMouseState *state);
 /* Patches the loaded image before the game runs (image still writable): libGnm entry hooks. */
 void bbgpu_patch_image(unsigned char *image, uint64_t size);
+/* 1 when bbgpu_patch_image installed the frame rate hooks (bbport_frame_rate.cpp); 0 when it did not
+ * (BB_FRAME_HOOKS=0, or a site of the game's code differs): the frame rate patches are the way then. */
+int bbgpu_frame_hooks_installed(void);
 /* Number of symbols registered by the vendored libraries (diagnostics). */
 unsigned bbgpu_symbol_count(void);
 #ifdef __cplusplus

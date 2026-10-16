@@ -75,7 +75,7 @@ export BB_FULLSCREEN=1 BB_UPSCALER=$upscaler BB_UPSCALE_PRESET=$preset
 # turned on (the player may sign in to Steam meanwhile).
 # What cannot follow it live is decided here, from the multiplier at start: that FSR 3.1 frame
 # generation is off (it is a setting of the upscaler: exclusive with this) and the 30 FPS limit's
-# delta-time patch (below: patches load when the game starts).
+# frame rate patches (below: patches load when the game starts).
 lsfg_requested=$(setting lsfg_multiplier)
 case $lsfg_requested in 2|3|4) ;; *) lsfg_requested=0 ;; esac
 lsfg=$lsfg_requested
@@ -124,18 +124,6 @@ export BB_COPY_GPU_BUFFERS=1 BB_GPU_WRITE_TWINS=1 BB_GPU_WRITE_TWINS_MAX=65536
 # collector works to a 4 GB budget instead of the driver's heap (the app was killed for memory once
 # the world loaded), and idle copies of game memory go after 20 s instead of 60 s.
 export BB_GC_BUDGET_MB=${BB_GC_BUDGET_MB:-4096} BB_VRAM_IDLE_SECONDS=${BB_VRAM_IDLE_SECONDS:-20}
-# FPS limit (fps_limit): 30 is the game's own timing; above it the delta-time patch
-# (fps=uncap.bin) with presents at once (vblank 480 Hz) and BB_FPS_LIMIT (0: none).
-fps_limit=$(setting fps_limit)
-case $fps_limit in 40|45|60|0) export BB_VBLANK_HZ=480 BB_FPS_LIMIT=$fps_limit ;;
-    *) fps_limit=30; export BB_VBLANK_HZ=60 ;; esac
-# Frame generation adds frames on screen only: at the game's own 30 FPS timing a slower frame still
-# slows the game down. With it, 30 means the delta-time patch at 30 real frames a second. This is
-# decided at start (patches load with the game): Lossless Scaling turned on later, at the 30 FPS limit,
-# runs on the game's own timing until the next start, and turned off later it keeps the patch.
-if { [ "${BB_FRAME_GEN:-0}" = 1 ] || [ -n "$lsfg" ]; } && [ "$fps_limit" = 30 ]; then
-    fps_limit=30-delta; export BB_VBLANK_HZ=480 BB_FPS_LIMIT=30
-fi
 # VSync (vsync=1): the app shows every frame for at least one display refresh, in order (a FIFO in
 # the app: libbbgpu says so in HELLO, bb_present_proto.h), which also holds the game to the refresh
 # rate when there is no FPS limit; 0: the newest frame is shown, frames that finish within one
@@ -201,6 +189,38 @@ export BB_FAILED_SHADER_DIR="$base/logs/failed-shaders"
 cp "$base/fex-compatible.json" "$HOME/.fex-emu/Config.json"
 # Local overrides for this device (experiments, tuning): sourced last, not part of the runtime.
 [ -f "$base/bionic-local.sh" ] && . "$base/bionic-local.sh"
+# FPS limit (fps_limit: 30, 40, 45, 60 or 0 for none) and the game's frame rate. Hooks in the game's code
+# (gpu/shim/bbport_frame_rate.cpp, installed when the game loads) give the game each frame's real time
+# for its steps, at any limit including 30, and leave the limiting to the present thread (BB_FPS_LIMIT;
+# vblank 480 Hz, frames shown at once): frame drops below the limit keep the game's speed. They replace the
+# community patches (fps=uncap.bin: Uncap FPS++ with Sprint Fix), which are loaded only if the hooks
+# cannot install (a site of the game's code differs: bb-probe's --fallback-patches, below), or with
+# BB_FRAME_HOOKS=0 (comparisons: today's timing; 30 without frame generation is the game's own).
+# After bionic-local.sh, so that it can set BB_FRAME_HOOKS=0.
+fps_limit=$(setting fps_limit)
+case $fps_limit in 30|40|45|60|0) ;; *) fps_limit=30 ;; esac
+frame_hooks=1
+if [ "${BB_FRAME_HOOKS:-1}" = 0 ]; then frame_hooks=0; export BB_FRAME_HOOKS=0; else unset BB_FRAME_HOOKS; fi
+if [ "$frame_hooks" = 1 ]; then
+    export BB_VBLANK_HZ=480 BB_FPS_LIMIT=$fps_limit
+else
+    case $fps_limit in 40|45|60|0) export BB_VBLANK_HZ=480 BB_FPS_LIMIT=$fps_limit ;;
+        *) export BB_VBLANK_HZ=60 ;; esac
+    # Frame generation adds frames on screen only: at the game's own 30 FPS timing a slower frame still
+    # slows the game down. With it, 30 means the delta-time patch at 30 real frames a second. This is
+    # decided at start (patches load with the game): Lossless Scaling turned on later, at the 30 FPS limit,
+    # runs on the game's own timing until the next start, and turned off later it keeps the patch.
+    if { [ "${BB_FRAME_GEN:-0}" = 1 ] || [ -n "$lsfg" ]; } && [ "$fps_limit" = 30 ]; then
+        fps_limit=30-delta; export BB_VBLANK_HZ=480 BB_FPS_LIMIT=30
+    fi
+fi
+# speed_floor (20, the default, or 30): how slow the game may get before it slows down. Below 30 FPS the
+# game's own frame time is 1/30 s and it runs in slow motion; 20 gives it real time down to 20 FPS (a step of
+# up to 50 ms: physics and animations take bigger steps), 30 is the game's own limit (upstream's hooks).
+speed_floor=$(setting speed_floor)
+case $speed_floor in 20|30) ;; *) speed_floor=20 ;; esac
+export BB_FRAME_DT_MAX_FPS=$speed_floor
+echo "Frame rate: limit $fps_limit, hooks $([ "$frame_hooks" = 1 ] && echo on || echo 'off (BB_FRAME_HOOKS=0)'), game speed kept down to $speed_floor FPS"
 cd "$base"
 [ -x "$bionic/bin/bb-probe" ] || { echo "The Bionic runtime is missing: $bionic" >&2; exit 2; }
 
@@ -231,7 +251,14 @@ if [ "${1:-game}" = game ]; then
         value=$(setting "$key")
         [ -f "$parts/$key=$value.bin" ] && patch_args="$patch_args --patches $parts/$key=$value.bin"
     done
-    [ "$fps_limit" != 30 ] && patch_args="$patch_args --patches $parts/fps=uncap.bin"
+    # Frame rate: the hooks (libbbgpu) or, with BB_FRAME_HOOKS=0, the community patch above 30 FPS (and with
+    # frame generation at 30: fps_limit=30-delta). If the hooks cannot install, bb-probe applies the patch
+    # as the fallback (the hooks write nothing then).
+    if [ "$frame_hooks" = 1 ]; then
+        patch_args="$patch_args --fallback-patches $parts/fps=uncap.bin"
+    elif [ "$fps_limit" != 30 ]; then
+        patch_args="$patch_args --patches $parts/fps=uncap.bin"
+    fi
     # No PSN here: the title screen goes straight to the main menu offline.
     [ "$(setting skip_network_choice)" != 0 ] && [ -f "$parts/skip_network_choice=1.bin" ] &&
         patch_args="$patch_args --patches $parts/skip_network_choice=1.bin"
