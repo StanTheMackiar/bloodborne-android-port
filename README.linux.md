@@ -3,8 +3,6 @@ THIS PROJECT IS NOT RELATED TO SHADPS4. ALL QUESTIONS RELATED TO THIS PROJECT SH
 
 # bbport — a native Linux port of Bloodborne
 
-**English** · [Русский](README.ru.md)
-
 bbport is the counterpart of Wine + DXVK for a single game: *Bloodborne* for PlayStation 4
 (CUSA03173, game version 1.09) on an x86-64 Linux PC. The game's original executable runs
 directly on the PC:

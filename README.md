@@ -23,7 +23,29 @@ Port of Bloodborne (PS4, **v1.09**, every retail release). The runtime and rende
 
 ## How it works
 
-This is a port, not an emulator. No PS4 hardware, firmware or operating system is emulated, and no PS4 BIOS is needed. It works like Wine + DXVK for one game: the game's own `eboot.bin` runs in an Android app process, its calls to PS4 system libraries land in native replacements, and its graphics are translated to Vulkan. The game runs as a plain Android (NDK) process: no Linux system, X server or Python is installed on the phone. Because the PS4 has an x86-64 CPU and the phone an ARM64 one, the game's machine code needs one more layer.
+This is a port, not an emulator. No PS4 hardware, firmware or operating system is emulated, and no PS4 BIOS is needed. It works like Wine + DXVK for one game: the game's own `eboot.bin` runs on the phone, its calls to PS4 system libraries land in native replacements, and its graphics are translated to Vulkan. Because the PS4 has an x86-64 CPU and the phone an ARM64 one, the game's machine code needs one more layer.
+
+Since 0.9.0 everything is a plain Android (NDK) program: no Linux system, X server or Python is installed on the phone.
+
+```mermaid
+flowchart LR
+  subgraph app["Android app (Java + JNI)"]
+    menu["Menu, settings,<br>mods, PKG install"]
+    present["Screen<br>(SurfaceControl)"]
+    audio["Sound<br>(AudioTrack)"]
+    pad["Controller &<br>touch input"]
+  end
+  subgraph game["Game process (native ARM64, bb-probe)"]
+    eboot["eboot.bin<br>x86-64 code"] --> fex["FEXCore<br>x86-64 → ARM64"]
+    fex --> rt["Runtime:<br>PS4 system libraries"]
+    rt --> gpu["Renderer:<br>PM4/GCN → Vulkan, FSR 3.1"]
+    gpu --> drv["Vulkan driver<br>(Turnip / PanVK, loaded directly)"]
+  end
+  menu -- "starts, settings files" --> game
+  gpu -- "frames: AHardwareBuffers + sync fences" --> present
+  rt -- "PCM audio" --> audio
+  pad -- "pad state" --> rt
+```
 
 **Translated while the game runs:**
 
@@ -36,9 +58,11 @@ This is a port, not an emulator. No PS4 hardware, firmware or operating system i
 **Native ARM64 code, no translation:**
 
 - **Runtime**: replaces the PS4 system libraries the game imports: threads, mutexes, semaphores, memory, time, files, save data, controller input, audio with ATRAC9 decoding, video output, movie playback. A call from the game goes straight to this code.
-- **Renderer**: based on [shadPS4](https://github.com/shadps4-emu/shadPS4)'s, through the [bloodborne_pc](https://github.com/deadinside28/bloodborne_pc) Linux port: command processing, texture and buffer caches, FSR 3.1.
-- **Vulkan driver**: a Mesa driver for Android that ships inside the APK and is picked for your GPU (see [GPU drivers](#gpu-drivers)), or the phone's own driver.
-- **The Android app**: menu, on-screen controller, mods and PKG installers.
+- **Renderer**: based on [shadPS4](https://github.com/shadps4-emu/shadPS4)'s, through the [bloodborne_pc](https://github.com/deadinside28/bloodborne_pc) Linux port: command processing, texture and buffer caches, FSR 3.1, and Lossless Scaling frame generation.
+- **Vulkan driver**: the game process opens the driver library itself, without Android's Vulkan loader, so it can use a Mesa driver that ships inside the APK and is picked for your GPU (see [GPU drivers](#gpu-drivers)), or the phone's own driver through the system loader.
+- **The Android app**: menu, settings, on-screen controller, mods, PKG installers and game preparation (`bb-prepare` checks the game files and builds the image the game runs from; the settings' game patches are compiled at build time and chosen at each start).
+
+**How the pieces talk:** the app starts the game process with a small launch script that turns the settings into environment variables. The renderer draws each finished frame into an Android hardware buffer (AHardwareBuffer) and hands it to the app over a local socket together with a sync fence, and the app puts it on the screen with SurfaceControl: no copy, and with VSync on, every frame stays up for at least one refresh. Sound goes from the game's mixer to the app's AudioTrack through a pipe, and controller and touch input go the other way through a small pad-state file. Settings that change while you play (cheats, frame generation) are small state files the game process watches.
 
 FEXCore runs in its fastest mode (no x86 memory-ordering emulation, reduced x87 precision). The PC build has no translation layer at all: there, the game's x86-64 code runs directly on the CPU.
 
