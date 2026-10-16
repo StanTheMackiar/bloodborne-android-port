@@ -36,7 +36,7 @@ export BB_IME_FILE="$base/ime.request"
 # aspect_ratio (auto, 4:3, 16:10, 16:9, 21:9, 32:9; auto when missing, 16:9 when unknown) is the display's: the app
 # sizes the game's surface to it and passes the surface's pixel size as BB_SCREEN_W/BB_SCREEN_H; auto is that
 # surface's own ratio (any, e.g. 20:9; else display_size, else 16:9). output_res (WxH, any even size; native:
-# the surface's size, else display_size fitted to the aspect ratio; native when missing) is the size of the final
+# the surface's size, else display_size fitted to the aspect ratio; 1080p when missing) is the size of the final
 # frame and the UI; when its ratio is not the aspect ratio's, the height is kept and the width follows it.
 # The preset sets the scene size relative to the output, FSR 3.1 upscales it to the output.
 # Another ratio than 16:9 is shown by hooks in the game's code (libbbgpu: bbport_display.cpp, from the output's
@@ -44,9 +44,9 @@ export BB_IME_FILE="$base/ime.request"
 # drawn at the output's ratio by the resolution patch (any size: its immediates are written by the runtime).
 upscaler=$(setting upscaler); preset=$(setting preset); output_setting=$(setting output_res)
 aspect_setting=$(setting aspect_ratio); display_setting=$(setting display_size)
-# Defaults when missing: aspect ratio auto, output native.
+# Defaults when missing: aspect ratio auto, output 1080p (the height kept, the width follows the aspect ratio below).
 [ -n "$aspect_setting" ] || aspect_setting=auto
-[ -n "$output_setting" ] || output_setting=native
+[ -n "$output_setting" ] || output_setting=1920x1080
 # size_ok WxH: size_w, size_h (positive, rounded down to even, at most 16384) or fails.
 size_ok() {
     case $1 in *x*) ;; *) return 1 ;; esac
@@ -176,10 +176,34 @@ export BB_OUTPUT_RES=$output BB_LIVE_RES=0
 if [ -n "$render" ]; then export BB_RENDER_RES=$render; else unset BB_RENDER_RES; fi
 export BB_DMEM_MB=$dmem_mb BB_PREUPLOAD=0 BB_GUEST_IN_PLACE=0 BB_UFFD=0
 export BB_COPY_GPU_BUFFERS=1 BB_GPU_WRITE_TWINS=1 BB_GPU_WRITE_TWINS_MAX=65536
-# GPU memory is the phone's system RAM, shared with the game's 5 GB and Android: the texture
-# collector works to a 4 GB budget instead of the driver's heap (the app was killed for memory once
-# the world loaded), and idle copies of game memory go after 20 s instead of 60 s.
-export BB_GC_BUDGET_MB=${BB_GC_BUDGET_MB:-4096} BB_VRAM_IDLE_SECONDS=${BB_VRAM_IDLE_SECONDS:-20}
+# GPU memory is the phone's system RAM, shared with the game's direct memory ($dmem_mb, taken right
+# after launch) and Android: the texture collector works to a budget instead of the driver's heap
+# (the app was killed for memory once the world loaded). Its start value is what is free now less
+# the direct memory and a 1536 MB reserve for Android and the app, 1024..4096 MB (4096 when
+# /proc/meminfo cannot be read); BB_GC_BUDGET_MB in the environment or bionic-local.sh overrides it.
+# libbbgpu then follows the free memory and swap while the game runs: it lowers the budget when the
+# system runs short, and raises it back (never above this start) when it recovers (BB_GC_ADAPT=0:
+# keep it fixed). Idle copies of game memory go after 20 s instead of 60 s.
+meminfo_mb() {
+    kb=$(sed -n "s/^$1: *\([0-9][0-9]*\) kB.*/\1/p" /proc/meminfo 2>/dev/null | tail -n 1)
+    case $kb in ''|*[!0-9]*) echo 0 ;; *) echo $((kb / 1024)) ;; esac
+}
+if [ -z "${BB_GC_BUDGET_MB:-}" ]; then
+    mem_total_mb=$(meminfo_mb MemTotal); mem_avail_mb=$(meminfo_mb MemAvailable)
+    if [ "$mem_avail_mb" -gt 0 ]; then
+        gc_budget_mb=$((mem_avail_mb - dmem_mb - 1536))
+        [ "$gc_budget_mb" -ge 1024 ] || gc_budget_mb=1024
+        [ "$gc_budget_mb" -le 4096 ] || gc_budget_mb=4096
+    else
+        gc_budget_mb=4096
+    fi
+    export BB_GC_BUDGET_MB=$gc_budget_mb
+    echo "Texture budget: $gc_budget_mb MB (MemAvailable $mem_avail_mb MB of $mem_total_mb MB, direct memory $dmem_mb MB, reserve 1536 MB; live, BB_GC_ADAPT=0 keeps it)"
+else
+    export BB_GC_BUDGET_MB
+    echo "Texture budget: $BB_GC_BUDGET_MB MB (set by the environment)"
+fi
+export BB_VRAM_IDLE_SECONDS=${BB_VRAM_IDLE_SECONDS:-20}
 # VSync (vsync=1): the app shows every frame for at least one display refresh, in order (a FIFO in
 # the app: libbbgpu says so in HELLO, bb_present_proto.h), which also holds the game to the refresh
 # rate when there is no FPS limit; 0: the newest frame is shown, frames that finish within one

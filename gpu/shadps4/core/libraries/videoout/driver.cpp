@@ -13,6 +13,7 @@
 #include <dirent.h>
 #include <unistd.h>
 #include "common/assert.h"
+#include "bbport_adpf.h"
 #include "bbport_toggles.h"
 #include "bbport_heap_sites.h"
 #include "bbport_wait_trace.h"
@@ -831,6 +832,8 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
 }
 
 void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop) {
+    // bbport: a frame is submitted: its CPU work duration goes to the performance hint session.
+    BbAdpf::FrameSubmitted();
     Vulkan::Frame* frame;
     if (index == -1) {
         frame = presenter->PrepareBlankFrame(false);

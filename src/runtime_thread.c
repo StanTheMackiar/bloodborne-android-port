@@ -5,6 +5,7 @@
 #define _GNU_SOURCE
 #include "runtime.h"
 #include "guest_cpu.h"
+#include "gpu/bbgpu.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -215,6 +216,7 @@ static void set_host_name(const char *name) {
     char host[16]={0};
     memcpy(host,name,strnlen(name,sizeof(host)-1));
     pthread_setname_np(pthread_self(),host);
+    bbgpu_adpf_thread_named(host);
 }
 static void *host_start(void *p) {
     GuestThread *t=p;

@@ -29,10 +29,10 @@ import java.util.Map;
  *  size, upscaler, the game's effect patches). Other lines and comments of the file are kept. */
 final class SettingsDialog {
     /** The output sizes depend on the aspect ratio (aspect_ratio) and the display; see outputs(). Legacy
-     *  output_res values (1920x1080, 1280x720, 854x480) load as they are. Display native is the default. */
+     *  output_res values (1920x1080, 1280x720, 854x480) load as they are. 1080p (1080 lines at the chosen aspect ratio) is the default. */
     private static final String[] ASPECT_VALUES={"auto","4:3","16:10","16:9","21:9","32:9"};
     private static final double[] ASPECT_RATIOS={0,4/3.0,16/10.0,16/9.0,21/9.0,32/9.0};
-    private static final int ASPECT_DEFAULT=0, OUTPUT_DEFAULT_HEIGHT=720;
+    private static final int ASPECT_DEFAULT=0, OUTPUT_DEFAULT_HEIGHT=1080;
     private static final int[] OUTPUT_HEIGHTS={360,480,540,720,1080,1440};
     private static final String[] PRESET_NAMES={"Native","Quality","Balanced","Performance","Ultra performance"};
     private static final double[] PRESET_SCALES={1.0,1.5,1.7,2.0,3.0};
@@ -257,7 +257,7 @@ final class SettingsDialog {
         final RadioGroup outputs=new RadioGroup(activity);
         box.addView(outputs);
         final List<int[]> sizes=new ArrayList<>();
-        final String[] wanted={get("output_res","native")}; // the saved value, then whatever is picked
+        final String[] wanted={get("output_res","1920x1080")}; // the saved value, then whatever is picked
         final TextView outputNote=new TextView(activity); outputNote.setTextSize(13); outputNote.setAlpha(0.7f);
         final long totalMem=totalMemory();
         final boolean lowMemory=totalMem>0 && totalMem<10L*1024*1024*1024; // a "12 GB" phone reports about 10.5-11 GiB

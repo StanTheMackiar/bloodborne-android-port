@@ -863,8 +863,23 @@ public final class MainActivity extends Activity {
 
     private void pollFrames() {
         if (destroyed) return;
-        if (!hadError && BbPresent.framesIfLoaded()>0) status.setVisibility(View.GONE);
+        if (!hadError && BbPresent.framesIfLoaded()>0) {
+            status.setVisibility(View.GONE);
+            if (game!=null && !playing) { playing=true; gameState(false); }
+        }
         main.postDelayed(this::pollFrames,1000);
+    }
+    /** Tells the OS (GameManager, Android 13+) whether the game is loading or being played: game boosters and
+     *  the scheduler treat uninterruptible gameplay as such. The game counts as loading from its start until its
+     *  first frame (pollFrames), and as not playing once stopped. */
+    private boolean playing;
+    private void gameState(boolean loading) { gameState(loading,android.app.GameState.MODE_GAMEPLAY_UNINTERRUPTIBLE); }
+    private void gameState(boolean loading,int mode) {
+        if (Build.VERSION.SDK_INT<33) return;
+        try {
+            android.app.GameManager gm=getSystemService(android.app.GameManager.class);
+            if (gm!=null) gm.setGameState(new android.app.GameState(loading,mode));
+        } catch (RuntimeException e) { android.util.Log.w("Bloodborne","GameManager.setGameState: "+e); }
     }
 
     /** The game's text dialog (the character name, BB_IME_FILE in run-bionic.sh): shown here with the
@@ -1107,6 +1122,7 @@ public final class MainActivity extends Activity {
     private void startGame() {
         if (destroyed) return;
         hadError=false;
+        playing=false; gameState(true);
         pickRefreshRate();
         new File(BASE,"ime.request").delete(); new File(BASE,"ime.request.result").delete();
         try {
@@ -1167,6 +1183,7 @@ public final class MainActivity extends Activity {
     }
     private void stopGame() {
         Process p=game; game=null;
+        playing=false; gameState(false,android.app.GameState.MODE_NONE);
         if (p!=null) { p.destroyForcibly(); try { p.waitFor(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); } }
     }
     @Override protected void onDestroy() {

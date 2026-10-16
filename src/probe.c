@@ -716,6 +716,7 @@ int main(int argc, char **argv) {
             if (result) fail("module initializer failed");
         }
     }
+    if (gpu_enabled) bbgpu_adpf_register_main(); /* the game runs on this thread: the performance hint session */
     printf("Entering original x86-64 code at guest offset 0x%" PRIx64 "\n", entry);
     entered_game=1;
     /* Static: the host stack may lie above 47-bit guest addresses (arm64 hosts). */
