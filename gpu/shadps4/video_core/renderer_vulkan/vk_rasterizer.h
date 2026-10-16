@@ -313,12 +313,18 @@ private:
         bool operator==(const BeginSignature&) const = default;
     };
     BeginSignature MakeBeginSignature(const GraphicsPipeline* pipeline) const;
+    /// The game's UI in an output of another aspect ratio: where its 16:9 screen ends
+    /// (UiComposition::ScreenEdges), 0: not such a pass.
+    struct UiPlacement {
+        float edge_x = 0.0f, edge_y = 0.0f;
+    };
     struct BeginMemo {
         bool valid = false;
         BeginSignature signature;
         RenderState state;
         u32 scene_size = 0;
         std::array<float, 2> target_scale{};
+        UiPlacement ui_placement;
     } begin_memo;
     u64 begin_memo_hits = 0, begin_memo_misses = 0;
     void Resolve();
@@ -462,6 +468,9 @@ private:
     std::unique_ptr<TemporalUpscaler> upscaler; // bbport: FSR (docs/upscaler.md)
     std::array<float, 2> draw_jitter{};         ///< viewport offset of the current draw, pixels
     std::array<float, 2> target_scale{1.0f, 1.0f}; ///< pass drawn into the upscaler's output-size images
+    UiPlacement ui_placement;                      ///< the same pass on an output of another aspect ratio
+    /// The UI's full-screen fills reach the output's edges (motion_param, EmitUiEdgeStretch).
+    void UiEdgeStretch(const GraphicsPipeline* pipeline);
     const bool host_markers_enabled;
     const bool guest_markers_enabled;
 

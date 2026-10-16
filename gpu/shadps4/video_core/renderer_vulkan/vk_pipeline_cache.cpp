@@ -28,6 +28,7 @@
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/motion_history.h"
 #include "video_core/renderer_vulkan/vk_draw_prep.h"
+#include "bbport_display.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -417,6 +418,8 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .paged_buffers = VideoCore::BufferCache::LayerPagedActive(),
         // The game's buffer copy shader, from its profile (games/).
         .buffer_copy_shader_hash = Game::BufferCopyShader(),
+        // bbport: another aspect ratio than 16:9 (part of the profile the shader cache is checked against).
+        .ui_edge_stretch = BbDisplay::NonNative(),
     };
     WarmUp();
 

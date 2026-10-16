@@ -1719,6 +1719,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     }
 
     // bbport: screen-space (clip disabled) draws into the upscaler's output-size images.
+    UiEdgeStretch(pipeline);
     push_data.xscale *= target_scale[0];
     push_data.xoffset *= target_scale[0];
     push_data.yscale *= target_scale[1];
@@ -1950,6 +1951,7 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
     }
 
     // bbport: screen-space (clip disabled) draws into the upscaler's output-size images.
+    UiEdgeStretch(pipeline);
     push_data.xscale *= target_scale[0];
     push_data.xoffset *= target_scale[0];
     push_data.yscale *= target_scale[1];
@@ -3797,6 +3799,7 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
             attachment_feedback_loop = false;
             push_data.scene_size = begin_memo.scene_size;
             target_scale = begin_memo.target_scale;
+            ui_placement = begin_memo.ui_placement;
             return begin_memo.state;
         }
         ++begin_memo_misses;
@@ -3813,7 +3816,7 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         if (!clears) {
             // Recomputed after the full path: it may have started the scene (scene_started).
             begin_memo = {true, MakeBeginSignature(pipeline), state, push_data.scene_size,
-                          target_scale};
+                          target_scale, ui_placement};
         }
     }
     return state;
@@ -4051,6 +4054,7 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
     // bbport: a pass drawn into the upscaler's output-size images (UI, display pass): every
     // attachment must be redirected, viewports and scissors are scaled.
     target_scale = {1.0f, 1.0f};
+    ui_placement = {};
     if (color_redirected || depth_redirected) {
         u32 color_targets = 0;
         for (u32 cb = 0; cb < state.num_color_attachments; ++cb) {
@@ -4100,6 +4104,10 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
             target_scale = UiComposition::Scale(guest_extent.first, guest_extent.second,
                                                 redirect.width, redirect.height,
                                                 native_coordinates);
+            if (const auto edges = UiComposition::ScreenEdges(redirect.width, redirect.height);
+                native_coordinates && (edges[0] < 1.0f || edges[1] < 1.0f)) {
+                ui_placement = {edges[0], edges[1]};
+            }
         }
     }
 
@@ -4114,6 +4122,7 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         state.width = proxy.width;
         state.height = proxy.height;
         target_scale = {float(size.width) / 1920.0f, float(size.height) / 1080.0f};
+        ui_placement = {};
     }
     if (FrameCapture::Active()) {
         std::array<const VideoCore::ImageInfo*, AmdGpu::NUM_COLOR_BUFFERS> colors{};
@@ -4131,6 +4140,28 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         object_motion->Attach(state, state.width, state.height);
     }
     return state;
+}
+
+void Rasterizer::UiEdgeStretch(const GraphicsPipeline* pipeline) {
+    // Every vertex shader but the motion vectors' has the corner snap (EmitUiEdgeStretch). A picture
+    // over the whole screen (the title's: 2048x1024) keeps its proportions, and so does text (its
+    // glyph sheet is 2048x2048). Masked content (Scaleform's masks are stencil tests: the HUD's item
+    // icons slide in a strip much taller than their slot) and the masks stay.
+    const auto& regs = Regs();
+    if (ui_placement.edge_x == 0.0f || regs.IsClipDisabled() ||
+        pipeline->GetGraphicsKey().motion_vectors ||
+        (regs.depth_control.stencil_enable && regs.depth_buffer.StencilValid())) {
+        return;
+    }
+    const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+    if (ps && !ps->images.empty()) {
+        const auto texture = ps->images[0].GetSharp(*ps);
+        if (u32(texture.width) + 1 >= 2048 || u32(texture.height) + 1 >= 2048) {
+            return;
+        }
+    }
+    push_data.motion_param = UiComposition::EdgeParam(ui_placement.edge_x, ui_placement.edge_y,
+                                                       regs.viewports[0].yscale > 0.0f);
 }
 
 void Rasterizer::Resolve() {

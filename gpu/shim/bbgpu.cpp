@@ -1,5 +1,6 @@
 #include "bbport_write_log.h"
 #include "bbport_game_menu.h"
+#include "bbport_display.h"
 #include "bbport_frame_rate.h"
 #include "bbport_gnm_hooks.h"
 // bbport: glue between the C loader and the vendored shadPS4 video core.
@@ -341,6 +342,7 @@ extern "C" void bbgpu_patch_image(unsigned char* image, uint64_t size) {
     BbGnmHooks::PatchImage(image, size);
     BbGameMenu::PatchImage(image, size);
     BbFrameRate::PatchImage(image, size);
+    BbDisplay::PatchImage(image, size);
 }
 
 extern "C" int bbgpu_frame_hooks_installed(void) {

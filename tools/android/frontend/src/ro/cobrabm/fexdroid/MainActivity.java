@@ -119,10 +119,16 @@ public final class MainActivity extends Activity {
     private FrameLayout.LayoutParams frame(int width,int height,int gravity) {
         return new FrameLayout.LayoutParams(width,height,gravity);
     }
+    /** The largest surface of the chosen aspect_ratio (16:9 by default; Auto: the display's own) that fits. */
+    private int[] fitSize(int width,int height) {
+        double aspect=SettingsDialog.aspectOf(setting("aspect_ratio"),SettingsDialog.displaySize(this));
+        int w=width, h=height;
+        if (w>h*aspect) w=(int)Math.round(h*aspect); else h=(int)Math.round(w/aspect);
+        return new int[]{Math.max(1,Math.min(width,w)),Math.max(1,Math.min(height,h))};
+    }
     private void fitSurface(int width,int height) {
         if (width<=0 || height<=0) return;
-        int w=width, h=height;
-        if ((long)w*9>(long)h*16) w=h*16/9; else h=w*9/16;
+        int[] fit=fitSize(width,height); int w=fit[0], h=fit[1];
         FrameLayout.LayoutParams p=(FrameLayout.LayoutParams)surface.getLayoutParams();
         if (p.width==w && p.height==h) return;
         p.width=w; p.height=h;
@@ -1122,7 +1128,15 @@ public final class MainActivity extends Activity {
                 main.post(() -> { if (!destroyed && drawerOpen) refreshDrawer(); });
             } else autoLine=null;
             // The surface's size in pixels: the present target of libbbgpu (BB_SCREEN_W/H).
+            // The aspect setting may have changed since the layout: refit, and report the size the surface gets.
             int w=surface.getWidth(), h=surface.getHeight();
+            if (screen.getWidth()>0 && screen.getHeight()>0) {
+                int[] fit=fitSize(screen.getWidth(),screen.getHeight()); w=fit[0]; h=fit[1];
+                main.post(() -> fitSurface(screen.getWidth(),screen.getHeight()));
+            }
+            // The physical display (landscape, long side first), for output_res=native and aspect_ratio=auto.
+            int[] display=SettingsDialog.displaySize(this);
+            new SettingsDialog(this,new File(BASE,"bbport.ini"),this::restartGame).set("display_size",display[0]+"x"+display[1]);
             extra.add("BB_SCREEN_W="+(w>0 ? w : 1280)); extra.add("BB_SCREEN_H="+(h>0 ? h : 720));
             // The last run's log stays as android-game.prev.log (one generation): a crash log survives the restart.
             File gameLog=new File(BASE,"logs/android-game.log"), previous=new File(BASE,"logs/android-game.prev.log");

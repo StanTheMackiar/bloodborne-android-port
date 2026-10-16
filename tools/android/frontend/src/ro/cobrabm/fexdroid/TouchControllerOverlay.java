@@ -61,7 +61,23 @@ final class TouchControllerOverlay extends View {
         }
         setContentDescription("On-screen PlayStation controller");
     }
-    private PointF center(String name) { return centers.get(name); }
+    /** Stored positions are in the 1280x720 layout (saved layouts stay valid). On a screen wider than 16:9 the
+     *  left controls are shifted to the left edge and the right ones to the right edge; the centre ones stay. */
+    private static final java.util.Set<String> LEFT=new java.util.HashSet<>(java.util.Arrays.asList(
+        "l2","l1","up","left","right","down","leftstick","l3"));
+    private static final java.util.Set<String> RIGHT=new java.util.HashSet<>(java.util.Arrays.asList(
+        "r1","r2","triangle","circle","cross","square","r3"));
+    private final Map<String,PointF> shown=new HashMap<>();
+    private float shift(String name) {
+        float extra=Math.max(0f,getWidth()/scale()-1280f);
+        return LEFT.contains(name) ? -extra/2f : RIGHT.contains(name) ? extra/2f : 0f;
+    }
+    /** The control's position on screen (layout units): the stored one plus the edge shift. */
+    private PointF center(String name) {
+        PointF stored=centers.get(name), p=shown.get(name);
+        if (p==null) { p=new PointF(); shown.put(name,p); }
+        p.set(stored.x+shift(name),stored.y); return p;
+    }
     private float size(String name) { Float s=sizes.get(name); return s==null ? 1f : s; }
     private static float clampSize(float s) { return Math.max(MIN_SIZE,Math.min(MAX_SIZE,s)); }
     // The 1280x720 layout drawn at one scale in the centred 16:9 area, as the game (MainActivity):
@@ -191,8 +207,8 @@ final class TouchControllerOverlay extends View {
                 sizes.put(dragged,clampSize(pinchSize*now/pinchDistance));
             } else if (index>=0) {
                 float barX=offsetX()/scale(),barY=offsetY()/scale();
-                center(dragged).set(
-                    Math.max(36-barX,Math.min(1244+barX,layoutX(e,index))),
+                centers.get(dragged).set(
+                    Math.max(36-barX,Math.min(1244+barX,layoutX(e,index)))-shift(dragged),
                     Math.max(36-barY,Math.min(684+barY,layoutY(e,index))));
             }
             invalidate();
@@ -201,7 +217,7 @@ final class TouchControllerOverlay extends View {
                 pinchPointer=-1;
                 if (dragged!=null) resize(dragged,size(dragged));
             } else if (id==editPointer && dragged!=null) {
-                PointF p=center(dragged);
+                PointF p=centers.get(dragged);
                 preferences.edit().putFloat("overlay_x_"+dragged,p.x).putFloat("overlay_y_"+dragged,p.y)
                     .putFloat("overlay_s_"+dragged,size(dragged)).apply();
                 editPointer=pinchPointer=-1; dragged=null;
