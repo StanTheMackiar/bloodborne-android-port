@@ -29,7 +29,9 @@ final class PkgProgress {
     /** Takes the progress itself (what feed parses from a line); label null keeps the last one. */
     void update(long d,long t,String name,long now) {
         done=Math.min(d,t>0 ? t : d); total=t;
-        if (name!=null) label=name;
+        if (name!=null && !name.equals(label)) { // a new phase (checking, extracting, ...): its own rate and estimate
+            label=name; rate=0; firstAt=-1; sampleAt=-1;
+        }
         if (firstAt<0) { firstAt=now; sampleAt=now; sampleDone=done; }
         else if (now-sampleAt>=WINDOW) {
             double instant=(done-sampleDone)*1000.0/(now-sampleAt);

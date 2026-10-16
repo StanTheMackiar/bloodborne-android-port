@@ -42,7 +42,7 @@ final class GameInstaller {
     private volatile boolean closed=true;
     private PkgProgressDialog progress;
     private String dest=DEFAULT_DEST;
-    private File pending; private String pendingName=""; private boolean pendingTemp, destChosen, stopped, busy;
+    private File pending; private String pendingName=""; private boolean pendingTemp, destChosen, stopped, busy, skipCheck;
 
     GameInstaller(Activity activity,Host host) { this.activity=activity; this.host=host; }
 
@@ -59,7 +59,7 @@ final class GameInstaller {
     /** Picks the PKG; where to install it is asked next. */
     void start() {
         if (busy) return;
-        closed=false; cancel.set(false); dest=DEFAULT_DEST; destChosen=false; stopped=false; pending=null;
+        closed=false; cancel.set(false); dest=DEFAULT_DEST; destChosen=false; stopped=false; pending=null; skipCheck=false;
         if (!host.hasStorage()) { host.toast("Installing needs storage access."); end(); return; }
         pickPkg();
     }
@@ -161,6 +161,19 @@ final class GameInstaller {
     }
     private void discard() { if (pending!=null && pendingTemp) pending.delete(); pending=null; }
 
+    /** The PKG does not match its own checksums: say which parts, and offer to pick it again, cancel, or go on. The
+     *  PKG (a cache copy too) is kept for "Install anyway". */
+    private void damaged(File pkg,boolean temporary,String parts) {
+        pending=pkg; pendingTemp=temporary;
+        new AlertDialog.Builder(activity).setTitle("This PKG is damaged").setCancelable(false)
+            .setMessage("The PKG doesn't match the checksums stored in it:\n\n"+parts
+                +"\n\nThe file is damaged or incomplete (a download or copy that went wrong). Download or copy it again, "
+                +"then pick it. Installing it as it is may fail or leave a game that crashes.")
+            .setPositiveButton("Pick again",(d,w) -> { discard(); pickPkg(); })
+            .setNegativeButton("Cancel",(d,w) -> { discard(); end(); })
+            .setNeutralButton("Install anyway",(d,w) -> { skipCheck=true; run(); }).show();
+    }
+
     /** The running game blocks a destination that holds its folder: ask, then stop it. */
     private void confirmStop() {
         if (holdsGame())
@@ -178,6 +191,7 @@ final class GameInstaller {
     }
     private void run() {
         final File pkg=pending; final boolean temporary=pendingTemp; pending=null;
+        final boolean check=!skipCheck; skipCheck=false;
         busy=true; cancel.set(false);
         // The first install on a new app also unpacks the app's runtime (host.pkgInstaller): some seconds.
         progress=new PkgProgressDialog(activity,"Install game","Preparing…",cancel);
@@ -192,18 +206,19 @@ final class GameInstaller {
                     track.update(done,total,label,now);
                     String what=track.label, text=track.detail(now); int permille=track.permille();
                     main.post(() -> { if (live() && !cancel.get()) progress.pkg(what,"Installing the game…",permille,text); });
-                },cancel::get);
+                },cancel::get,check);
                 if (cancel.get()) throw new CancellationException();
             } catch (CancellationException e) { cancelled=true;
             } catch (Exception e) {
                 failure=e.getMessage()!=null ? e.getMessage() : e.toString();
                 android.util.Log.e("Bloodborne","game install: "+e);
-            } finally { if (temporary) pkg.delete(); }
+            } finally { if (temporary && !(result!=null && result.damaged!=null)) pkg.delete(); } // a damaged one is kept for "Install anyway"
             PkgInstaller.GameResult o=result; String problem=failure; boolean stop=cancelled;
             main.post(() -> {
                 progress.dismiss(); busy=false;
-                if (!live()) return;
+                if (!live()) { if (temporary && o!=null && o.damaged!=null) pkg.delete(); return; }
                 if (stop) { host.toast("Install cancelled."); end(); }
+                else if (problem==null && o!=null && o.damaged!=null) damaged(pkg,temporary,o.damaged);
                 else if (problem!=null) alert("Not installed",problem,false);
                 else if (!o.ok) alert("Not installed",o.problem==null ? "The PKG could not be installed." : o.problem,false);
                 else finished(o);
