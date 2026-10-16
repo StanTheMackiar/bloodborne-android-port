@@ -36,7 +36,7 @@ flowchart LR
     pad["Controller &<br>touch input"]
   end
   subgraph game["Game process (native ARM64, bb-probe)"]
-    eboot["eboot.bin<br>x86-64 code"] --> fex["FEXCore<br>x86-64 → ARM64"]
+    eboot["eboot.bin, libc.prx,<br>libSceFios2.prx (x86-64)"] --> fex["FEXCore<br>x86-64 → ARM64"]
     fex --> rt["Runtime:<br>PS4 system libraries"]
     rt --> gpu["Renderer:<br>PM4/GCN → Vulkan, FSR 3.1"]
     gpu --> drv["Vulkan driver<br>(Turnip / PanVK, loaded directly)"]
@@ -51,14 +51,15 @@ flowchart LR
 
 | What | From | To | By |
 |---|---|---|---|
-| The game's CPU code (`eboot.bin`) | x86-64 (AVX, BMI) | ARM64 | [FEXCore](https://github.com/FEX-Emu/FEX), built into the game process as a library: only the game's code goes through it, no x86 Linux, Wine or Box64 |
+| The game's CPU code: `eboot.bin` and the two PS4 modules the game ships (`sce_module/libc.prx`, `libSceFios2.prx`), linked into one image by `bb-prepare` | x86-64 (AVX, BMI) | ARM64 | [FEXCore](https://github.com/FEX-Emu/FEX), built into the game process as a library: only the game's code goes through it, no x86 Linux, Wine or Box64 |
 | GPU commands the game writes itself (it links libGnm statically) | AMD GCN command buffers (PM4) | Vulkan commands | the renderer |
 | Shaders | AMD GCN | SPIR-V | the renderer's shader recompiler |
+| Lossless Scaling's shaders (only with frame generation on) | DXBC, read from your own `Lossless.dll` | SPIR-V | lsfg-vk's translator, once when frame generation starts |
 
 **Native ARM64 code, no translation:**
 
 - **Runtime**: replaces the PS4 system libraries the game imports: threads, mutexes, semaphores, memory, time, files, save data, controller input, audio with ATRAC9 decoding, video output, movie playback. A call from the game goes straight to this code.
-- **Renderer**: based on [shadPS4](https://github.com/shadps4-emu/shadPS4)'s, through the [bloodborne_pc](https://github.com/deadinside28/bloodborne_pc) Linux port: command processing, texture and buffer caches, FSR 3.1, and Lossless Scaling frame generation.
+- **Renderer**: based on [shadPS4](https://github.com/shadps4-emu/shadPS4)'s, through the [bloodborne_pc](https://github.com/deadinside28/bloodborne_pc) Linux port: command processing, texture and buffer caches, FSR 3.1. Lossless Scaling frame generation is a separate library ([lsfg-vk](https://github.com/Ragnarok93/lsfg-vk-android)) the renderer loads when it is on, on the same Vulkan driver.
 - **Vulkan driver**: the game process opens the driver library itself, without Android's Vulkan loader, so it can use a Mesa driver that ships inside the APK and is picked for your GPU (see [GPU drivers](#gpu-drivers)), or the phone's own driver through the system loader.
 - **The Android app**: menu, settings, on-screen controller, mods, PKG installers and game preparation (`bb-prepare` checks the game files and builds the image the game runs from; the settings' game patches are compiled at build time and chosen at each start).
 
