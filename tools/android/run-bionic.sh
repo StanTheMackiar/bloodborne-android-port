@@ -32,32 +32,88 @@ setting() { sed -n "s/^$1=//p" "$BB_CONFIG" 2>/dev/null | tail -n 1; }
 export BB_ANDROID_INPUT=1
 export BB_PAD_FILE="$base/android-pad.state" BB_PAD_QUIET=1
 export BB_IME_FILE="$base/ime.request"
-# The output (output_res: 1920x1080, 1280x720 or 854x480; 720p when missing) is the size of the final
-# frame and the UI; the preset sets the scene size relative to it, FSR 3.1 upscales it to the output.
-upscaler=$(setting upscaler); preset=$(setting preset); output=$(setting output_res)
+# ---- Aspect ratio, output and scene size ----
+# aspect_ratio (auto, 4:3, 16:10, 16:9, 21:9, 32:9; auto when missing, 16:9 when unknown) is the display's: the app
+# sizes the game's surface to it and passes the surface's pixel size as BB_SCREEN_W/BB_SCREEN_H; auto is that
+# surface's own ratio (any, e.g. 20:9; else display_size, else 16:9). output_res (WxH, any even size; native:
+# the surface's size, else display_size fitted to the aspect ratio; 1080p when missing) is the size of the final
+# frame and the UI; when its ratio is not the aspect ratio's, the height is kept and the width follows it.
+# The preset sets the scene size relative to the output, FSR 3.1 upscales it to the output.
+# Another ratio than 16:9 is shown by hooks in the game's code (libbbgpu: bbport_display.cpp, from the output's
+# ratio in BB_OUTPUT_RES): the camera, the UI's viewport, the HUD's markers and groups; and the scene is
+# drawn at the output's ratio by the resolution patch (any size: its immediates are written by the runtime).
+upscaler=$(setting upscaler); preset=$(setting preset); output_setting=$(setting output_res)
+aspect_setting=$(setting aspect_ratio); display_setting=$(setting display_size)
+# Defaults when missing: aspect ratio auto, output 1080p (the height kept, the width follows the aspect ratio below).
+[ -n "$aspect_setting" ] || aspect_setting=auto
+[ -n "$output_setting" ] || output_setting=1920x1080
+# size_ok WxH: size_w, size_h (positive, rounded down to even, at most 16384) or fails.
+size_ok() {
+    case $1 in *x*) ;; *) return 1 ;; esac
+    size_w=${1%%x*}; size_h=${1#*x}
+    case $size_w in ''|*[!0-9]*) return 1 ;; esac
+    case $size_h in ''|*[!0-9]*) return 1 ;; esac
+    [ ${#size_w} -le 5 ] && [ ${#size_h} -le 5 ] || return 1
+    size_w=$((10#$size_w / 2 * 2)); size_h=$((10#$size_h / 2 * 2))
+    [ "$size_w" -ge 2 ] && [ "$size_h" -ge 2 ] && [ "$size_w" -le 16384 ] && [ "$size_h" -le 16384 ]
+}
+screen_w=0; screen_h=0; display_w=0; display_h=0
+if size_ok "${BB_SCREEN_W:-}x${BB_SCREEN_H:-}"; then screen_w=$size_w; screen_h=$size_h; fi
+if size_ok "$display_setting"; then display_w=$size_w; display_h=$size_h; fi
+case $aspect_setting in
+    4:3) an=4; ad=3 ;; 16:10) an=16; ad=10 ;; 21:9) an=21; ad=9 ;; 32:9) an=32; ad=9 ;;
+    auto)
+        if [ "$screen_w" != 0 ]; then an=$screen_w; ad=$screen_h
+        elif [ "$display_w" != 0 ]; then an=$display_w; ad=$display_h
+        else an=16; ad=9; fi ;;
+    *) aspect_setting=16:9; an=16; ad=9 ;;
+esac
+output_w=0
+case $output_setting in
+    native)
+        if [ "$screen_w" != 0 ]; then output_w=$screen_w; output_h=$screen_h
+        elif [ "$display_w" != 0 ]; then
+            # The display fitted to the aspect ratio (the largest size of that ratio inside it).
+            if [ $((display_w * ad)) -ge $((display_h * an)) ]; then
+                output_h=$display_h; output_w=$((display_h * an / ad / 2 * 2))
+            else
+                output_w=$display_w; output_h=$((display_w * ad / an / 2 * 2))
+            fi
+        fi ;;
+    *) if size_ok "$output_setting"; then output_w=$size_w; output_h=$size_h; fi ;;
+esac
+if [ "$output_w" = 0 ] || [ "$output_h" = 0 ]; then output_w=1280; output_h=720; fi
+# Not the aspect ratio's ratio (more than 1% off): the height is kept.
+if [ $(( (output_w * ad - output_h * an) * 100 )) -gt $((output_h * an)) ] ||
+   [ $(( (output_h * an - output_w * ad) * 100 )) -gt $((output_h * an)) ]; then
+    output_w=$(( (output_h * an + ad) / (2 * ad) * 2 ))
+fi
+output=${output_w}x${output_h}
+echo "Display: aspect ratio $aspect_setting ($an:$ad), output $output (surface ${BB_SCREEN_W:-?}x${BB_SCREEN_H:-?}, display $display_setting)"
 # FSR 4 (INT8 models) is not offered: on the Adreno 740 it took ~3 min to compile in Turnip, then ran
 # at 2.4 FPS with a black scene. Any value but off means FSR 3.1.
 case $upscaler in off) ;; *) upscaler=fsr3 ;; esac
 echo "Upscaler setting: $upscaler"
 case $preset in 0|1|2|3|4) ;; *) preset=3 ;; esac
-case $output in 1920x1080|1280x720|854x480) ;; *) output=1280x720 ;; esac
-# The scene size: the output / the preset's scale (1.5, 1.7, 2, 3), each side rounded to even, as
-# build_patch_parts.py (render_sizes()) names the res-*.bin patches.
-render=$output
+# The scene size: the output / the preset's scale (1, 1.5, 1.7, 2, 3), each side rounded to even, as
+# patches.py (scaled_sizes) does; any size, any ratio.
+scale10=10
 if [ "$upscaler" != off ]; then
-    case $output:$preset in
-        1920x1080:1) render=1280x720 ;; 1920x1080:2) render=1130x636 ;; 1920x1080:3) render=960x540 ;;
-        1920x1080:4) render=640x360 ;;
-        1280x720:1) render=854x480 ;; 1280x720:2) render=752x424 ;; 1280x720:3) render=640x360 ;;
-        1280x720:4) render=426x240 ;;
-        854x480:1) render=570x320 ;; 854x480:2) render=502x282 ;; 854x480:3) render=428x240 ;;
-        854x480:4) render=284x160 ;;
-    esac
+    case $preset in 1) scale10=15 ;; 2) scale10=17 ;; 3) scale10=20 ;; 4) scale10=30 ;; esac
 fi
+scene_w=$(( (output_w * 10 + scale10) / (2 * scale10) * 2 )); scene_h=$(( (output_h * 10 + scale10) / (2 * scale10) * 2 ))
+[ "$scene_w" -ge 2 ] || scene_w=2
+[ "$scene_h" -ge 2 ] || scene_h=2
+render=${scene_w}x${scene_h}
 # A scene of the game's own 1920x1080 (1080p Native, or 1080p without the upscaler) needs no resolution
 # patch and no BB_RENDER_RES: the renderer then takes the game's targets as they are (with
 # BB_RENDER_RES it tells the scene from the 1920x1080 UI by its size).
 if [ "$render" = 1920x1080 ]; then render=; preset=0; fi
+# A scene larger than 1080p (pixels) needs the larger graphics heaps (the patch's own 'above 1080p') and
+# direct memory (the PC build uses 9152 MB; 5056 is enough up to 1080p): that is most of the phone's RAM.
+dmem_mb=5056; big_scene=0
+if [ $((scene_w * scene_h)) -gt $((1920 * 1080)) ]; then big_scene=1; dmem_mb=${BB_DMEM_MB_HIGH:-9152}; fi
+echo "Scene ${render:-1920x1080} for $output at preset $preset$([ "$big_scene" = 1 ] && echo "; larger than 1080p: $dmem_mb MB direct memory")"
 export BB_FULLSCREEN=1 BB_UPSCALER=$upscaler BB_UPSCALE_PRESET=$preset
 # FSR 3.1 frame generation (frame_generation=1): a frame between each two, with FSR 3.1 only.
 [ "$(setting frame_generation)" = 1 ] && [ "$upscaler" = fsr3 ] && export BB_FRAME_GEN=1
@@ -118,12 +174,36 @@ export BB_DRAW_PIPE=${BB_DRAW_PIPE:-1}
 export BB_WINDOW_SIZE=$output
 export BB_OUTPUT_RES=$output BB_LIVE_RES=0
 if [ -n "$render" ]; then export BB_RENDER_RES=$render; else unset BB_RENDER_RES; fi
-export BB_DMEM_MB=5056 BB_PREUPLOAD=0 BB_GUEST_IN_PLACE=0 BB_UFFD=0
+export BB_DMEM_MB=$dmem_mb BB_PREUPLOAD=0 BB_GUEST_IN_PLACE=0 BB_UFFD=0
 export BB_COPY_GPU_BUFFERS=1 BB_GPU_WRITE_TWINS=1 BB_GPU_WRITE_TWINS_MAX=65536
-# GPU memory is the phone's system RAM, shared with the game's 5 GB and Android: the texture
-# collector works to a 4 GB budget instead of the driver's heap (the app was killed for memory once
-# the world loaded), and idle copies of game memory go after 20 s instead of 60 s.
-export BB_GC_BUDGET_MB=${BB_GC_BUDGET_MB:-4096} BB_VRAM_IDLE_SECONDS=${BB_VRAM_IDLE_SECONDS:-20}
+# GPU memory is the phone's system RAM, shared with the game's direct memory ($dmem_mb, taken right
+# after launch) and Android: the texture collector works to a budget instead of the driver's heap
+# (the app was killed for memory once the world loaded). Its start value is what is free now less
+# the direct memory and a 1536 MB reserve for Android and the app, 1024..4096 MB (4096 when
+# /proc/meminfo cannot be read); BB_GC_BUDGET_MB in the environment or bionic-local.sh overrides it.
+# libbbgpu then follows the free memory and swap while the game runs: it lowers the budget when the
+# system runs short, and raises it back (never above this start) when it recovers (BB_GC_ADAPT=0:
+# keep it fixed). Idle copies of game memory go after 20 s instead of 60 s.
+meminfo_mb() {
+    kb=$(sed -n "s/^$1: *\([0-9][0-9]*\) kB.*/\1/p" /proc/meminfo 2>/dev/null | tail -n 1)
+    case $kb in ''|*[!0-9]*) echo 0 ;; *) echo $((kb / 1024)) ;; esac
+}
+if [ -z "${BB_GC_BUDGET_MB:-}" ]; then
+    mem_total_mb=$(meminfo_mb MemTotal); mem_avail_mb=$(meminfo_mb MemAvailable)
+    if [ "$mem_avail_mb" -gt 0 ]; then
+        gc_budget_mb=$((mem_avail_mb - dmem_mb - 1536))
+        [ "$gc_budget_mb" -ge 1024 ] || gc_budget_mb=1024
+        [ "$gc_budget_mb" -le 4096 ] || gc_budget_mb=4096
+    else
+        gc_budget_mb=4096
+    fi
+    export BB_GC_BUDGET_MB=$gc_budget_mb
+    echo "Texture budget: $gc_budget_mb MB (MemAvailable $mem_avail_mb MB of $mem_total_mb MB, direct memory $dmem_mb MB, reserve 1536 MB; live, BB_GC_ADAPT=0 keeps it)"
+else
+    export BB_GC_BUDGET_MB
+    echo "Texture budget: $BB_GC_BUDGET_MB MB (set by the environment)"
+fi
+export BB_VRAM_IDLE_SECONDS=${BB_VRAM_IDLE_SECONDS:-20}
 # VSync (vsync=1): the app shows every frame for at least one display refresh, in order (a FIFO in
 # the app: libbbgpu says so in HELLO, bb_present_proto.h), which also holds the game to the refresh
 # rate when there is no FPS limit; 0: the newest frame is shown, frames that finish within one
@@ -187,6 +267,17 @@ export BB_SCREEN_W="${BB_SCREEN_W:-1280}" BB_SCREEN_H="${BB_SCREEN_H:-720}"
 # libbbgpu: SPIR-V of pipelines the driver rejects is written here (vk_shader_util.cpp).
 export BB_FAILED_SHADER_DIR="$base/logs/failed-shaders"
 cp "$base/fex-compatible.json" "$HOME/.fex-emu/Config.json"
+# ---- Debug options (Debug options in the app menu; bbport.ini debug_* keys, a missing key is its default) ----
+# Write-fault tracking: how the game's writes to GPU memory are tracked. Only the non-default values are
+# exported; bionic-local.sh (below) and the environment can still override them.
+dbg_prepare=on; dbg_drain=on; dbg_lock=on; dbg_stats=off; dbg_profile=off
+if [ "$(setting debug_fault_prepare)" = 0 ]; then export BB_FAULT_PREPARE=0; dbg_prepare=off; fi
+if [ "$(setting debug_fault_smart_drain)" = 0 ]; then export BB_FAULT_DRAIN=always; dbg_drain=off; fi
+if [ "$(setting debug_fault_sleep_lock)" = 0 ]; then export BB_FAULT_SPINLOCK=1; dbg_lock=off; fi
+# Diagnostics (off by default).
+if [ "$(setting debug_frame_stats)" = 1 ]; then export BB_FRAME_STATS=1; dbg_stats=on; fi
+if [ "$(setting debug_gpu_profile)" = 1 ]; then export BB_GPU_PROFILE=1; dbg_profile=on; fi
+echo "Debug: fault prepare $dbg_prepare, smart drain $dbg_drain, sleeping lock $dbg_lock, frame stats $dbg_stats, GPU profile $dbg_profile"
 # Local overrides for this device (experiments, tuning): sourced last, not part of the runtime.
 [ -f "$base/bionic-local.sh" ] && . "$base/bionic-local.sh"
 # FPS limit (fps_limit: 30, 40, 45, 60 or 0 for none) and the game's frame rate. Hooks in the game's code
@@ -243,8 +334,10 @@ if [ "${1:-game}" = game ]; then
     [ -d "$parts" ] || { echo "The patches are missing: $parts" >&2; exit 2; }
     patch_args=
     if [ -n "$render" ]; then
-        [ -f "$parts/res-$render.bin" ] || { echo "The patch for the scene size $render is missing: $parts/res-$render.bin" >&2; exit 2; }
-        patch_args="--patches $parts/res-$render.bin"
+        [ -f "$parts/res-scene.bin" ] || { echo "The scene size patch is missing: $parts/res-scene.bin" >&2; exit 2; }
+        # The patch holds a 1280x720 scene: libbbgpu writes the real size (BB_RENDER_RES) into it at load.
+        patch_args="--patches $parts/res-scene.bin"
+        [ "$big_scene" = 1 ] && [ -f "$parts/graphics-heap.bin" ] && patch_args="$patch_args --patches $parts/graphics-heap.bin"
     fi
     for key in effect_chromatic_aberration effect_dof effect_motion_blur effect_ssao \
                effect_game_aa effect_dynamic_shadows effect_ssr skip_intro debug_camera debug_menu model_lod; do

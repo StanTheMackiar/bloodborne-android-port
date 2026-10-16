@@ -242,8 +242,12 @@ void Save() {
         put(Effects[e].key, flag(v.effects[e]));
     }
     put("model_lod", std::to_string(v.model_lod.load()));
-    put("output_res", std::to_string(OutputWidths[v.output_res]) + "x" +
-                          std::to_string(OutputHeights[v.output_res]));
+    // A fixed session's output (Android: any size, set by the app from aspect_ratio / output_res) is not
+    // one of the table's: the file's line stays as it is.
+    if (!FixedRenderSession()) {
+        put("output_res", std::to_string(OutputWidths[v.output_res]) + "x" +
+                              std::to_string(OutputHeights[v.output_res]));
+    }
     // Read by run.sh at start.
     put("live_resolution", v.live_resolution < 0 ? "auto" : flag(v.live_resolution != 0));
     if (v.menu_x >= 0.0f && v.menu_y >= 0.0f) {

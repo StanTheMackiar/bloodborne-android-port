@@ -1,5 +1,6 @@
 #include "bbport_write_log.h"
 #include "bbport_game_menu.h"
+#include "bbport_display.h"
 #include "bbport_frame_rate.h"
 #include "bbport_gnm_hooks.h"
 // bbport: glue between the C loader and the vendored shadPS4 video core.
@@ -10,6 +11,7 @@
 #include <sys/resource.h>
 #include "bbport_free_check.h"
 #include "bbport_toggles.h"
+#include "bbport_fault.h"
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
@@ -55,6 +57,7 @@ int32_t* runtime_errno(void);
 void runtime_memory_set_gpu_hooks(RuntimeGpuRange map, RuntimeGpuRange unmap, RuntimeGpuRange invalidate);
 void runtime_memory_set_note_write_hook(RuntimeGpuRange note);
 void runtime_memory_set_cpu_write_hook(RuntimeGpuRange hook);
+void runtime_memory_set_prepare_write_hook(RuntimeGpuRange hook);
 }
 
 Frontend::WindowSDL* g_window = nullptr;
@@ -116,6 +119,13 @@ void MemoryManager::SetRasterizer(Vulkan::Rasterizer* rasterizer_) {
     runtime_memory_set_cpu_write_hook([](uintptr_t address, uint64_t size) {
         Memory::Instance()->GetRasterizer()->OnCpuWrite(address, size);
     });
+    // bbport BB_FAULT_PREPARE: the same copies over pages the page manager write-protects (copy
+    // memory model): the faults of the range, taken once before the copy.
+    if (BbFault::Prepare()) {
+        runtime_memory_set_prepare_write_hook([](uintptr_t address, uint64_t size) {
+            Memory::Instance()->GetRasterizer()->OnCpuWritePrepare(address, size);
+        });
+    }
 }
 void MemoryManager::InvalidateMemory(VAddr address, u64 size) {
     if (rasterizer) rasterizer->InvalidateMemory(address, size);
@@ -341,6 +351,7 @@ extern "C" void bbgpu_patch_image(unsigned char* image, uint64_t size) {
     BbGnmHooks::PatchImage(image, size);
     BbGameMenu::PatchImage(image, size);
     BbFrameRate::PatchImage(image, size);
+    BbDisplay::PatchImage(image, size);
 }
 
 extern "C" int bbgpu_frame_hooks_installed(void) {

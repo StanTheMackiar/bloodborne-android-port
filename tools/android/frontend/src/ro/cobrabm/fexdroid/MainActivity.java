@@ -119,10 +119,16 @@ public final class MainActivity extends Activity {
     private FrameLayout.LayoutParams frame(int width,int height,int gravity) {
         return new FrameLayout.LayoutParams(width,height,gravity);
     }
+    /** The largest surface of the chosen aspect_ratio (16:9 by default; Auto: the display's own) that fits. */
+    private int[] fitSize(int width,int height) {
+        double aspect=SettingsDialog.aspectOf(setting("aspect_ratio"),SettingsDialog.displaySize(this));
+        int w=width, h=height;
+        if (w>h*aspect) w=(int)Math.round(h*aspect); else h=(int)Math.round(w/aspect);
+        return new int[]{Math.max(1,Math.min(width,w)),Math.max(1,Math.min(height,h))};
+    }
     private void fitSurface(int width,int height) {
         if (width<=0 || height<=0) return;
-        int w=width, h=height;
-        if ((long)w*9>(long)h*16) w=h*16/9; else h=w*9/16;
+        int[] fit=fitSize(width,height); int w=fit[0], h=fit[1];
         FrameLayout.LayoutParams p=(FrameLayout.LayoutParams)surface.getLayoutParams();
         if (p.width==w && p.height==h) return;
         p.width=w; p.height=h;
@@ -245,6 +251,10 @@ public final class MainActivity extends Activity {
         section("App");
         updateItem=menuItem("ic_refresh","Check for updates","Version "+updater.version(),() -> updater.check());
         menuItem("ic_bug_report","Report a problem","Save logs for a GitHub issue",() -> { closeDrawer(); report.show(); });
+        menuItem("ic_tune","Debug options","Performance switches for testing",() -> {
+            closeDrawer();
+            new DebugDialog(this,new SettingsDialog(this,new File(BASE,"bbport.ini"),this::restartGame),this::restartGame).show();
+        });
 
         // The version, pinned under the scrolling menu.
         String version="";
@@ -865,8 +875,23 @@ public final class MainActivity extends Activity {
 
     private void pollFrames() {
         if (destroyed) return;
-        if (!hadError && BbPresent.framesIfLoaded()>0) status.setVisibility(View.GONE);
+        if (!hadError && BbPresent.framesIfLoaded()>0) {
+            status.setVisibility(View.GONE);
+            if (game!=null && !playing) { playing=true; gameState(false); }
+        }
         main.postDelayed(this::pollFrames,1000);
+    }
+    /** Tells the OS (GameManager, Android 13+) whether the game is loading or being played: game boosters and
+     *  the scheduler treat uninterruptible gameplay as such. The game counts as loading from its start until its
+     *  first frame (pollFrames), and as not playing once stopped. */
+    private boolean playing;
+    private void gameState(boolean loading) { gameState(loading,android.app.GameState.MODE_GAMEPLAY_UNINTERRUPTIBLE); }
+    private void gameState(boolean loading,int mode) {
+        if (Build.VERSION.SDK_INT<33) return;
+        try {
+            android.app.GameManager gm=getSystemService(android.app.GameManager.class);
+            if (gm!=null) gm.setGameState(new android.app.GameState(loading,mode));
+        } catch (RuntimeException e) { android.util.Log.w("Bloodborne","GameManager.setGameState: "+e); }
     }
 
     /** The game's text dialog (the character name, BB_IME_FILE in run-bionic.sh): shown here with the
@@ -1109,6 +1134,7 @@ public final class MainActivity extends Activity {
     private void startGame() {
         if (destroyed) return;
         hadError=false;
+        playing=false; gameState(true);
         pickRefreshRate();
         new File(BASE,"ime.request").delete(); new File(BASE,"ime.request.result").delete();
         try {
@@ -1136,7 +1162,15 @@ public final class MainActivity extends Activity {
             modsLog.add(memory.logLine());
             android.util.Log.i("Bloodborne",memory.logLine());
             // The surface's size in pixels: the present target of libbbgpu (BB_SCREEN_W/H).
+            // The aspect setting may have changed since the layout: refit, and report the size the surface gets.
             int w=surface.getWidth(), h=surface.getHeight();
+            if (screen.getWidth()>0 && screen.getHeight()>0) {
+                int[] fit=fitSize(screen.getWidth(),screen.getHeight()); w=fit[0]; h=fit[1];
+                main.post(() -> fitSurface(screen.getWidth(),screen.getHeight()));
+            }
+            // The physical display (landscape, long side first), for output_res=native and aspect_ratio=auto.
+            int[] display=SettingsDialog.displaySize(this);
+            new SettingsDialog(this,new File(BASE,"bbport.ini"),this::restartGame).set("display_size",display[0]+"x"+display[1]);
             extra.add("BB_SCREEN_W="+(w>0 ? w : 1280)); extra.add("BB_SCREEN_H="+(h>0 ? h : 720));
             // The last run's log stays as android-game.prev.log (one generation): a crash log survives the restart.
             File gameLog=new File(BASE,"logs/android-game.log"), previous=new File(BASE,"logs/android-game.prev.log");
@@ -1167,6 +1201,7 @@ public final class MainActivity extends Activity {
     }
     private void stopGame() {
         Process p=game; game=null;
+        playing=false; gameState(false,android.app.GameState.MODE_NONE);
         if (p!=null) { p.destroyForcibly(); try { p.waitFor(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); } }
     }
     @Override protected void onDestroy() {

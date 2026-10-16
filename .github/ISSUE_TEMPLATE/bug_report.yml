@@ -96,7 +96,8 @@ body:
       label: Logs (optional, but they help a lot)
       description: |
         In the app: Menu → **Report a problem** saves a zip with your device, settings and the game's last two logs to the Download folder
-        (the app's button opens this form with the device fields filled in). Drag that zip into this box.
+        (the app's button opens this form with the device fields filled in and a link to the zip it uploaded;
+        if there is no link, drag that zip into this box).
         With adb from a PC you can also attach the log of the session that went wrong:
         `adb shell run-as com.ducvd89.bloodborne cat files/bbport/logs/android-game.log > android-game.log`
         Drag the file into this box rather than pasting it.

@@ -9,17 +9,19 @@ import java.util.Locale;
 /** The GPU memory budgets for this phone's RAM (no Android classes, so it is tested on a desktop JDK).
  *
  *  On a phone the GPU's memory is system RAM, shared with the game and Android, and Turnip reports a heap of all
- *  of it (8.3 GB on a 12 GB phone). Two budgets follow from that, both tuned on 16 GB phones:
- *  - BB_GC_BUDGET_MB (run-bionic.sh: 4096): the texture collector starts freeing images at 70% of it;
+ *  of it (8.3 GB on a 12 GB phone). Two budgets follow from that:
+ *  - BB_GC_BUDGET_MB: the texture collector starts freeing images at 70% of it. run-bionic.sh starts it from the
+ *    memory free at launch and libbbgpu follows the free memory and swap while the game runs (bbport_gc_budget):
+ *    the app leaves it alone unless it is set by hand;
  *  - the VRAM budget the renderer takes from the driver: copies of the game's memory go into Vulkan buffers until
- *    90% of it, and on Android they are never returned (that needs the in-place memory model). BB_VRAM_LIMIT_MB=N
- *    takes it as at most N MiB.
+ *    90% of it. BB_VRAM_LIMIT_MB=N takes it as at most N MiB.
  *  On a 12 GB phone (MemTotal 10.8 GiB), without restarting it between sessions, the copies grew to 1.3 GB in
  *  Central Yharnam and the phone swapped: 2-5 FPS after ~4 minutes. With both at 2048 the game stayed playable
- *  (~25-28 FPS) for about 8 minutes (issue #8). The app passes them by MemTotal; bionic-local.sh, sourced after,
- *  still overrides them, and bbport.ini gpu_memory_budget_mb=N sets both by hand. */
+ *  (~25-28 FPS) for about 8 minutes (issue #8). The app passes the VRAM limit by MemTotal; bionic-local.sh, sourced
+ *  after, still overrides it, and bbport.ini gpu_memory_budget_mb=N sets both by hand. */
 final class MemoryBudget {
-    /** The texture collector's budget, and the VRAM budget taken from the driver (0: the driver's own), in MiB. */
+    /** The texture collector's budget (0: run-bionic.sh's, live), and the VRAM budget taken from the driver (0: the
+     *  driver's own), in MiB. */
     final long textureMb, vramMb;
     /** MemTotal in KiB (0 when unknown) and why these values: one log line. */
     final long memTotalKb;
@@ -33,13 +35,13 @@ final class MemoryBudget {
 
     /** The values for a phone with `memTotalKb` of MemTotal. Phones report less than their RAM (the modem and the
      *  camera keep some): 16 GB phones ~15 GiB, 12 GB ~10.8 GiB, 8 GB ~7.3 GiB. 16 GB phones and an unknown MemTotal
-     *  keep run-bionic.sh's budget and the driver's VRAM budget, as before. */
+     *  keep the driver's VRAM budget, as before. */
     static MemoryBudget forMemTotal(long memTotalKb) {
         String ram = memTotalKb > 0 ? String.format(Locale.ROOT, "%.1f GB RAM", memTotalKb / (double)GIB_KB) : "RAM unknown";
-        if (memTotalKb <= 0 || memTotalKb >= 14 * GIB_KB) return new MemoryBudget(4096, 0, memTotalKb, ram + ": the default budget");
-        if (memTotalKb >= 10 * GIB_KB) return new MemoryBudget(2048, 2048, memTotalKb, ram + ": a 12 GB phone");
-        if (memTotalKb >= 6 * GIB_KB) return new MemoryBudget(1536, 1536, memTotalKb, ram + ": an 8 GB phone");
-        return new MemoryBudget(1024, 1024, memTotalKb, ram + ": a phone with less than 8 GB");
+        if (memTotalKb <= 0 || memTotalKb >= 14 * GIB_KB) return new MemoryBudget(0, 0, memTotalKb, ram + ": the default budget");
+        if (memTotalKb >= 10 * GIB_KB) return new MemoryBudget(0, 2048, memTotalKb, ram + ": a 12 GB phone");
+        if (memTotalKb >= 6 * GIB_KB) return new MemoryBudget(0, 1536, memTotalKb, ram + ": an 8 GB phone");
+        return new MemoryBudget(0, 1024, memTotalKb, ram + ": a phone with less than 8 GB");
     }
 
     /** The values for `memTotalKb`, with both budgets set by hand (setting: bbport.ini gpu_memory_budget_mb, may be
@@ -72,15 +74,17 @@ final class MemoryBudget {
         catch (IOException e) { return 0; }
     }
 
-    /** The environment run-bionic.sh reads (BB_VRAM_LIMIT_MB only when there is a limit). */
+    /** The environment run-bionic.sh reads: each budget only when this sets it. */
     String[] environment() {
-        return vramMb > 0 ? new String[]{"BB_GC_BUDGET_MB=" + textureMb, "BB_VRAM_LIMIT_MB=" + vramMb}
-                          : new String[]{"BB_GC_BUDGET_MB=" + textureMb};
+        java.util.List<String> env = new java.util.ArrayList<>();
+        if (textureMb > 0) env.add("BB_GC_BUDGET_MB=" + textureMb);
+        if (vramMb > 0) env.add("BB_VRAM_LIMIT_MB=" + vramMb);
+        return env.toArray(new String[0]);
     }
 
     /** One line for the game log. */
     String logLine() {
-        return "Memory: " + reason + " -> textures " + textureMb + " MB, GPU memory "
+        return "Memory: " + reason + " -> textures " + (textureMb > 0 ? textureMb + " MB" : "from the free memory") + ", GPU memory "
             + (vramMb > 0 ? "taken as " + vramMb + " MB" : "as the driver reports");
     }
 }

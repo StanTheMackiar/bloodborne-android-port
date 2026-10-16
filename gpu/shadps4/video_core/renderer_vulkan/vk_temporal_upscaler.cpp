@@ -1676,16 +1676,27 @@ void TemporalUpscaler::RunUiOnly(VideoCore::ImageId color_id, VideoCore::ImageId
                         vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferRead);
         runtime.FlushBarriers();
     }
+    // Without a scene (the title, loading screens) on an output of another aspect ratio, the frame past
+    // the game's 16:9 screen is black: the game's movies fill their whole (wider) view with their
+    // background colour there, as they fill the screen at 16:9.
+    const auto edges = UiComposition::ScreenEdges(target_width, target_height);
+    const bool screen_only = !camera_motion.Depth() && (edges[0] < 1.0f || edges[1] < 1.0f);
+    const auto part = [](u32 size, float edge, bool high) {
+        return s32(std::lround(float(size) * (high ? 1.0f + edge : 1.0f - edge) * 0.5f));
+    };
+    const float ex = screen_only ? edges[0] : 1.0f, ey = screen_only ? edges[1] : 1.0f;
     const vk::ImageBlit region{
         .srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
-        .srcOffsets = std::array{vk::Offset3D{0, 0, 0},
-            vk::Offset3D{s32(source_width), s32(source_height), 1}},
+        .srcOffsets = std::array{
+            vk::Offset3D{part(source_width, ex, false), part(source_height, ey, false), 0},
+            vk::Offset3D{part(source_width, ex, true), part(source_height, ey, true), 1}},
         .dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
-        .dstOffsets = std::array{vk::Offset3D{0, 0, 0},
-            vk::Offset3D{s32(ui_width), s32(ui_height), 1}},
+        .dstOffsets = std::array{
+            vk::Offset3D{part(ui_width, ex, false), part(ui_height, ey, false), 0},
+            vk::Offset3D{part(ui_width, ex, true), part(ui_height, ey, true), 1}},
     };
-    scheduler.Record([source, source_layout, ui = vk::Image(ui_image),
-                      region](vk::CommandBuffer cmd) {
+    scheduler.Record([source, source_layout, ui = vk::Image(ui_image), region,
+                      screen_only](vk::CommandBuffer cmd) {
         vk::ImageMemoryBarrier2 barrier{
             .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
             .srcAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
@@ -1697,6 +1708,18 @@ void TemporalUpscaler::RunUiOnly(VideoCore::ImageId color_id, VideoCore::ImageId
             .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
         };
         cmd.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &barrier});
+        if (screen_only) {
+            const vk::ClearColorValue black{std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f}};
+            const vk::ImageSubresourceRange all{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+            cmd.clearColorImage(ui, vk::ImageLayout::eTransferDstOptimal, black, all);
+            const vk::MemoryBarrier2 clear_then_blit{
+                .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+                .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+                .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+                .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            };
+            cmd.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &clear_then_blit});
+        }
         cmd.blitImage(source, source_layout, ui, vk::ImageLayout::eTransferDstOptimal, region,
                       vk::Filter::eLinear);
         barrier.srcStageMask = vk::PipelineStageFlagBits2::eTransfer;

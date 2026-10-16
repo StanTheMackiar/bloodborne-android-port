@@ -12,6 +12,9 @@
 #include "common/logging/log.h"
 #include "common/thread.h"
 #include "ntapi.h"
+
+// bbport: the frame-critical threads join the Android performance hint session (bbport_adpf.cpp).
+extern "C" void bbgpu_adpf_thread_named(const char* name);
 #ifdef __APPLE__
 #include <mach/mach.h>
 #include <mach/mach_time.h>
@@ -200,6 +203,8 @@ void SetCurrentThreadName(const char* name) {
     if (int e = pthread_setname_np(pthread_self(), truncated.c_str())) {
         errno = e;
         LOG_ERROR(Common, "Failed to set thread name to '{}': {}", truncated, GetLastErrorMsg());
+    } else {
+        bbgpu_adpf_thread_named(truncated.c_str());
     }
 #else
     pthread_setname_np(pthread_self(), name);

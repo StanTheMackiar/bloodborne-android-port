@@ -48,13 +48,20 @@ final class PkgInstaller {
 
     static final class ModResult {
         boolean ok; String name, problem; ModManager.Mod mod;
+        /** Set (with ok false, problem the same text) when the PKG did not match its own checksums: the file is
+         *  damaged or incomplete. The text lists the parts that are damaged. */
+        String damaged;
     }
     static final class GameResult {
         boolean ok, ready; String gameDir, titleId, category, appVer, next, problem;
+        /** As ModResult.damaged. */
+        String damaged;
     }
 
     /** A problem the app shows to the player (the message is the text). */
-    static final class Failure extends Exception { Failure(String message) { super(message); } }
+    static class Failure extends Exception { Failure(String message) { super(message); } }
+    /** The PKG does not match its checksums (the message lists the damaged parts). */
+    static final class Damaged extends Failure { Damaged(String message) { super(message); } }
 
     static final long MIB = 1L << 20, GIB = 1L << 30;
     static final long MOD_MARGIN = 256 * MIB, GAME_MARGIN = GIB; // free space wanted beyond the extracted size
@@ -177,17 +184,40 @@ final class PkgInstaller {
         return empty;
     }
 
-    /** Failure when the PKG has empty parts (emptyData): before the tool spends minutes unpacking them as zeros. */
+    /** Damaged when the PKG has empty parts (emptyData): found in seconds by sampling, before verifyPkg reads all of
+     *  it and before the tool spends minutes unpacking them as zeros. */
     private void checkData(File pkg, Header info, Progress progress, BooleanSupplier cancelled) throws Failure {
         long empty = emptyData(pkg, info, progress, cancelled);
         if (empty == 0) return;
         log.accept("PKG data check: about " + empty / MIB + " MiB of the PFS image are zeros");
-        throw new Failure("This PKG file is damaged: about " + (empty >= 100 * MIB ? gigabytes(empty) : empty / MIB + " MB")
+        throw new Damaged("This PKG file is damaged: about " + (empty >= 100 * MIB ? gigabytes(empty) : empty / MIB + " MB")
             + " of it are empty (zeros), as when parts of a download never arrived. Download it again.");
     }
 
     private static long be32(byte[] d, int at) { return ((d[at] & 0xffL) << 24) | ((d[at + 1] & 0xffL) << 16) | ((d[at + 2] & 0xffL) << 8) | (d[at + 3] & 0xffL); }
     private static long be64(byte[] d, int at) { return (be32(d, at) << 32) | be32(d, at + 4); }
+
+    // ---- Checking for damage ----
+
+    /** Checks the PKG against the SHA-256 digests it carries (PkgVerifier) before anything is unpacked, as the
+     *  progress label PkgVerifier.LABEL. Damaged gives the parts that do not match. The check never blocks an
+     *  install by failing itself: an error other than a read error is logged and the PKG goes on. */
+    private void verifyPkg(File pkg, Progress progress, BooleanSupplier cancelled) throws Failure {
+        PkgVerifier.Report report;
+        try {
+            progress.progress(0, 0, PkgVerifier.LABEL);
+            report = PkgVerifier.verify(pkg, progress, cancelled);
+        } catch (CancellationException e) {
+            throw e;
+        } catch (IOException e) {
+            throw new Failure("Can't read the PKG: " + FsUtil.strerror(e));
+        } catch (RuntimeException e) {
+            log.accept("PKG check skipped: " + describe(e));
+            return;
+        }
+        log.accept("PKG check: " + report.bytesRead + " bytes read, matched " + report.matched + ", damaged " + report.damaged.size());
+        if (!report.ok()) throw new Damaged(report.describe());
+    }
 
     // ---- Staging ----
 
@@ -375,10 +405,18 @@ final class PkgInstaller {
     /** Unpacks a PS4 fake PKG and keeps its dvdroot_ps4 as the mod `name` (made unique) in `modsDir`. `game` (may be
      *  null) is the game folder an eboot.bin in the PKG is compared with. */
     ModResult installMod(File pkg, String name, File modsDir, File game, Progress progress, BooleanSupplier cancelled) {
+        return installMod(pkg, name, modsDir, game, progress, cancelled, true);
+    }
+
+    /** As above; `check` false skips the check of the PKG against its own checksums ("Install anyway"). A damaged
+     *  PKG is not installed: the result has `damaged` (and `problem`) set. */
+    ModResult installMod(File pkg, String name, File modsDir, File game, Progress progress, BooleanSupplier cancelled, boolean check) {
         ModResult result = new ModResult();
         File[] staging = {null};
         try {
-            installMod(result, staging, pkg, name, modsDir, game, progress, cancelled);
+            installMod(result, staging, pkg, name, modsDir, game, progress, cancelled, check);
+        } catch (Damaged damage) {
+            result.damaged = result.problem = damage.getMessage();
         } catch (Failure failure) {
             result.problem = failure.getMessage();
         } catch (CancellationException e) {
@@ -392,7 +430,7 @@ final class PkgInstaller {
     }
 
     private void installMod(ModResult result, File[] state, File pkg, String rawName, File modsDir, File game,
-                            Progress progress, BooleanSupplier cancelled) throws Exception {
+                            Progress progress, BooleanSupplier cancelled, boolean check) throws Exception {
         String name = validModName(rawName);
         Header info = readPkg(pkg);
         String early = modIdentityProblem(info.sfo, info.contentId);
@@ -402,7 +440,7 @@ final class PkgInstaller {
         long need = info.size + MOD_MARGIN;
         if (space.free(modsDir) < need)
             throw new Failure("Not enough free space: " + gigabytes(need) + " needed, " + gigabytes(space.free(modsDir)) + " available");
-        checkData(pkg, info, progress, cancelled);
+        if (check) { checkData(pkg, info, progress, cancelled); verifyPkg(pkg, progress, cancelled); }
         File staging = state[0] = newStaging(modsDir);
         runTool(pkg, staging, MOD_MARGIN, modsDir, progress, cancelled);
         progress.progress(0, 0, "Checking");
@@ -539,11 +577,19 @@ final class PkgInstaller {
     /** Unpacks a game PKG (base game "gd" or update "gp") into dest/<TITLE_ID> (dest may be that folder itself),
      *  merging an update into the installed game. */
     GameResult installGame(File pkg, File dest, boolean replace, Progress progress, BooleanSupplier cancelled) {
+        return installGame(pkg, dest, replace, progress, cancelled, true);
+    }
+
+    /** As above; `check` false skips the check of the PKG against its own checksums ("Install anyway"). A damaged
+     *  PKG is not installed: the result has `damaged` (and `problem`) set. */
+    GameResult installGame(File pkg, File dest, boolean replace, Progress progress, BooleanSupplier cancelled, boolean check) {
         GameResult result = new GameResult();
         File[] state = {null, null};
         try {
-            installGame(result, state, pkg, dest, replace, progress, cancelled);
+            installGame(result, state, pkg, dest, replace, progress, cancelled, check);
             result.ok = true;
+        } catch (Damaged damage) {
+            result.damaged = result.problem = damage.getMessage();
         } catch (Failure failure) {
             result.problem = failure.getMessage();
         } catch (CancellationException e) {
@@ -570,7 +616,7 @@ final class PkgInstaller {
     }
 
     private void installGame(GameResult result, File[] state, File pkg, File dest, boolean replace, Progress progress,
-                             BooleanSupplier cancelled) throws Exception {
+                             BooleanSupplier cancelled, boolean check) throws Exception {
         Header info = readPkg(pkg);
         if (info.sfo == null) throw new Failure("This PKG is damaged: its param.sfo can't be read");
         String[] id = identify(result, info.sfo, info.contentId);
@@ -592,7 +638,7 @@ final class PkgInstaller {
         long need = info.size + GAME_MARGIN;
         if (space.free(parent) < need)
             throw new Failure("Not enough free space: " + gigabytes(need) + " needed, " + gigabytes(space.free(parent)) + " available");
-        checkData(pkg, info, progress, cancelled);
+        if (check) { checkData(pkg, info, progress, cancelled); verifyPkg(pkg, progress, cancelled); }
         File staging = state[0] = newStaging(parent);
         runTool(pkg, staging, GAME_MARGIN, parent, progress, cancelled);
         progress.progress(0, 0, "Installing");

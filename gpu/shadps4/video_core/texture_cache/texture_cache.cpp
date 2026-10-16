@@ -5,6 +5,7 @@
 
 #include "bbport_toggles.h"
 #include "bbport_free_check.h"
+#include "bbport_gc_budget.h"
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/div_ceil.h"
@@ -1180,11 +1181,10 @@ void TextureCache::GarbageCollectImages() {
         // ~1 GB after its 8 GB system reserve: usage stayed above the critical mark, so the
         // collector evicted images used two or three frames ago on every submission and wrote
         // GPU-written ones back. Compare with the driver's current budget instead.
-        // BB_GC_BUDGET_MB=N: this rule with a fixed budget on any GPU (tests on a desktop).
-        static const u64 forced_budget = [] {
-            const char* env = std::getenv("BB_GC_BUDGET_MB");
-            return env ? std::strtoull(env, nullptr, 10) << 20 : 0;
-        }();
+        // BB_GC_BUDGET_MB=N: this rule with a fixed budget on any GPU (tests on a desktop), the
+        // phone's start value (run-bionic.sh). It follows the system's free memory while the game
+        // runs (BbGcBudget, bbport_gc_budget.cpp), read here on each call.
+        const u64 forced_budget = BbGcBudget::Bytes();
         if (instance.IsIntegrated() || forced_budget) {
             const u64 budget = forced_budget ? forced_budget : instance.GetDeviceMemoryBudgetNow();
             if (budget != 0) {
@@ -1225,10 +1225,13 @@ void TextureCache::GarbageCollectImages() {
     if (total_used_memory < trigger_gc_memory) {
         return;
     }
-    static const u64 idle_seconds = [] {
+    static const u64 base_idle_seconds = [] {
         const char* env = std::getenv("BB_GC_IDLE_SECONDS");
         return std::clamp<u64>(env ? std::strtoull(env, nullptr, 10) : 20, 1, 63);
     }();
+    // bbport: the system is short of memory (BbGcBudget): textures idle for 5 s go, not 20.
+    const u64 idle_seconds = BbGcBudget::Short() ? std::min<u64>(base_idle_seconds, 5)
+                                                 : base_idle_seconds;
     // Under pressure an image goes once unused for BB_GC_PRESSURE_IDLE_SECONDS (5), over the
     // critical mark for 1 s first, and only then by submissions as before (80/160 ticks, a
     // fraction of a second). On cards up to 8 GB the pressure mark is 40 % of the budget: the

@@ -44,7 +44,10 @@ final class GameCheck {
      *  not unpack: a broken extraction). */
     static final class Found {
         final String kind, title, version;
-        Found(String kind, String title, String version) { this.kind = kind; this.title = title; this.version = version; }
+        /** "damaged_files": the shaders that do not unpack (paths relative to the game); else empty. */
+        final List<String> files;
+        Found(String kind, String title, String version) { this(kind, title, version, new ArrayList<String>()); }
+        Found(String kind, String title, String version, List<String> files) { this.kind = kind; this.title = title; this.version = version; this.files = files; }
     }
 
     /** eboot.bin is not a decrypted PS4 executable the check can read (Python's ValueError). */
@@ -288,7 +291,10 @@ final class GameCheck {
         if (version == null) version = "?";
         try {
             if (imageHash == null) imageHash = imageSha256(game);
-            if (imageHash.equals(supported)) return brokenFiles(game, CHECKED_FOLDER).isEmpty() ? null : new Found("damaged_files", title, version);
+            if (imageHash.equals(supported)) {
+                List<String> broken = brokenFiles(game, CHECKED_FOLDER);
+                return broken.isEmpty() ? null : new Found("damaged_files", title, version, broken);
+            }
         } catch (IOException | Unreadable e) {
             return new Found("unreadable", title, version);
         }
@@ -315,11 +321,15 @@ final class GameCheck {
                 + "(any region, The Old Hunters editions too) with update 1.09.";
             case "unreadable": return f + " eboot.bin could not be read as a decrypted PS4 executable: dump "
                 + "the game and the 1.09 update again.";
-            case "damaged_files": return f + " The game files are damaged: the shaders in " + CHECKED_FOLDER + " do "
-                + "not unpack, and the game would hang while loading them. The extraction "
-                + "tool left parts of compressed sectors stale (LibOrbisPkg PkgTool on "
-                + ".NET 6 or newer, issue #81): extract the game and the 1.09 update again "
-                + "with a fixed tool.";
+            case "damaged_files": {
+                StringBuilder list = new StringBuilder();
+                for (int i = 0; i < found.files.size() && i < 5; ++i) list.append("\n- ").append(found.files.get(i));
+                if (found.files.size() > 5) list.append("\n- and ").append(found.files.size() - 5).append(" more");
+                return f + " The installed game has damaged files: " + found.files.size() + " of the shaders in " + CHECKED_FOLDER
+                    + " do not unpack, and the game would hang while loading them." + list
+                    + "\n\nThe PKG was damaged or incomplete, or the install was cut short. Delete the game folder, copy the base "
+                    + "game PKG and the 1.09 update PKG again (a fresh download), and install both again.";
+            }
             default: return f;
         }
     }

@@ -8,6 +8,7 @@
 #include <cstdlib>
 
 #include "bbport_toggles.h"
+#include "bbport_fault.h"
 #include "common/div_ceil.h"
 #include "common/logging/log.h"
 #include "core/emulator_settings.h"
@@ -15,7 +16,8 @@
 #ifdef __unix__
 #include "common/adaptive_mutex.h"
 #endif
-// bbport: Bionic has no PTHREAD_ADAPTIVE_MUTEX_INITIALIZER_NP: LockType falls back to SpinLock.
+// bbport: Bionic has no PTHREAD_ADAPTIVE_MUTEX_INITIALIZER_NP: LockType falls back to a lock that spins
+// briefly and then sleeps (Common::SleepMutex; BB_FAULT_SPINLOCK=1: spins as Common::SpinLock did).
 #include "common/spin_lock.h"
 #include "common/debug.h"
 #include "common/types.h"
@@ -27,7 +29,7 @@ namespace VideoCore {
 #ifdef PTHREAD_ADAPTIVE_MUTEX_INITIALIZER_NP
 using LockType = Common::AdaptiveMutex;
 #else
-using LockType = Common::SpinLock;
+using LockType = Common::SleepMutex;
 #endif
 
 /**

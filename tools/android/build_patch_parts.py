@@ -16,21 +16,11 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts'))
 import patches  # noqa: E402
 
-# The three outputs the app offers (1080p, 720p, 480p; output_res in the settings): the upscaler's
-# output and the size of the UI it composes over the scene.
-OUTPUTS = [(1280, 720), (1920, 1080), (854, 480)]
-
-
-def render_sizes():
-    """Scene sizes of every preset at every output (patches.scaled_sizes), the game's own excluded."""
-    sizes = set()
-    for out in OUTPUTS:
-        for scale in patches.PRESET_SCALES:
-            size = tuple(max(2, round(v / scale / 2) * 2) for v in out)
-            if size == patches.OUTPUT_SIZE:
-                continue  # 1920x1080: the game's own size, no patch
-            sizes.add(size)
-    return sorted(sizes)
+# The scene size is any size (any aspect ratio: bbport.ini aspect_ratio / output_res): res-scene.bin is the
+# resolution patch with the 1280x720 scene of its template and the UI's 1920x1080, and the runtime writes
+# the scene's two immediates itself from BB_RENDER_RES (gpu/shim/bbport_display.cpp, PatchSceneSize).
+# graphics-heap.bin: the larger graphics heaps a scene above 1080p needs (with BB_DMEM_MB raised).
+SCENE_TEMPLATE = (1280, 720)
 
 
 def write(path, writes):
@@ -121,10 +111,11 @@ def main():
     text = args.eboot.read_bytes()[0x4000:0x4000 + 0x50d96dc]  # the code segment (offset 0x4000, vaddr 0)
     write(args.out / 'cheats.bin', cheat_writes(text))
     count += 1
-    for size in render_sizes():
-        writes = patches.resolution_writes(args.xml, size, args.app_version, segments)
-        write(args.out / f'res-{size[0]}x{size[1]}.bin', writes)
-        count += 1
+    write(args.out / 'res-scene.bin',
+          patches.resolution_writes(args.xml, SCENE_TEMPLATE, args.app_version, segments))
+    write(args.out / 'graphics-heap.bin',
+          patches.compile_patches(args.xml, ['Increased Graphics Heap Sizes'], args.app_version, segments))
+    count += 2
     print(f'{count} patch files in {args.out}')
 
 

@@ -46,6 +46,10 @@ public:
     /// Unregister a range of gpu memory that was unmapped.
     void OnGpuUnmap(VAddr address, size_t size);
 
+    /// bbport: whether a watcher write-protects the page at `address` (a lock-free read: a stale
+    /// answer costs a fault or a call that finds nothing to do).
+    [[nodiscard]] bool IsWriteProtected(VAddr address) const;
+
     /// Updates watches in the pages touching the specified region.
     template <bool track>
     void UpdatePageWatchers(VAddr addr, u64 size) const;

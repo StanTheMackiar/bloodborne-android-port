@@ -3,6 +3,7 @@
 
 #include <boost/container/small_vector.hpp>
 #include "bbport_toggles.h"
+#include "bbport_fault.h"
 #include "bblayer_write_traps.h"
 #include "common/assert.h"
 #include "common/debug.h"
@@ -48,11 +49,13 @@
 #include <sys/ioctl.h>
 #include <sys/syscall.h>
 #endif
-// bbport: Bionic has no PTHREAD_ADAPTIVE_MUTEX_INITIALIZER_NP: LockType falls back to SpinLock.
+// bbport: Bionic has no PTHREAD_ADAPTIVE_MUTEX_INITIALIZER_NP: LockType falls back to a lock that spins
+// briefly and then sleeps (Common::SleepMutex).
 #include "common/spin_lock.h"
 
 extern "C" void runtime_memory_set_write_watch(uintptr_t address, uint64_t size, int watch);
 extern "C" int runtime_memory_vma_info(uintptr_t address, int* prot, int* type, uintptr_t* end);
+extern "C" void runtime_memory_set_page_protected(uintptr_t address, uint64_t size, int is_protected);
 
 namespace VideoCore {
 
@@ -315,6 +318,18 @@ struct PageManager::Impl {
 
     virtual void Protect(VAddr address, size_t size, Core::MemoryPermission perms) = 0;
 
+    /// bbport BB_FAULT_PREPARE: Protect, and the runtime told which pages now trap writes (it
+    /// announces the writes it does for the game to the GPU side first, instead of faulting).
+    /// Only with write tracking (the copy memory model): else nothing is protected.
+    void ApplyProtect(VAddr address, size_t size, Core::MemoryPermission perms) {
+        static const bool tell_runtime = BbFault::Prepare() && VideoCore::WriteTracking();
+        if (tell_runtime) {
+            runtime_memory_set_page_protected(address, size,
+                                              !True(perms & Core::MemoryPermission::Write));
+        }
+        Protect(address, size, perms);
+    }
+
     static bool GuestFaultSignalHandler(void* context, void* fault_address) {
         const auto addr = reinterpret_cast<VAddr>(fault_address);
         const u64 rip = NoteFaultSite(context, addr);
@@ -374,7 +389,7 @@ struct PageManager::Impl {
             if (range_bytes > 0) {
                 RENDERER_TRACE;
                 // Perform pending (un)protect action
-                Protect(range_begin << PM_PAGE_BITS, range_bytes, perms);
+                ApplyProtect(range_begin << PM_PAGE_BITS, range_bytes, perms);
                 range_bytes = 0;
                 potential_range_bytes = 0;
             }
@@ -445,7 +460,7 @@ struct PageManager::Impl {
             if (range_bytes > 0) {
                 RENDERER_TRACE;
                 // Perform pending (un)protect action
-                Protect((range_begin << PM_PAGE_BITS), range_bytes, perms);
+                ApplyProtect((range_begin << PM_PAGE_BITS), range_bytes, perms);
                 range_bytes = 0;
                 potential_range_bytes = 0;
             }
@@ -542,7 +557,7 @@ struct PageManager::Impl {
 #ifdef PTHREAD_ADAPTIVE_MUTEX_INITIALIZER_NP
     using LockType = Common::AdaptiveMutex;
 #else
-    using LockType = Common::SpinLock;
+    using LockType = Common::SleepMutex;
 #endif
     std::array<LockType, NUM_ADDRESS_LOCKS> locks{};
 };
@@ -724,6 +739,7 @@ struct SignalImpl : public PageManager::Impl {
 };
 
 PageManager::PageManager(Vulkan::Rasterizer* rasterizer_) {
+    BbFault::LogSwitches();
 #ifdef __linux__
     // bbport: dma-buf guest memory (BB_GUEST_GPU_MEMORY=1) cannot be write-protected by userfaultfd
     // (anonymous and shmem only): its registration would fail and writes go unseen.
@@ -746,6 +762,14 @@ PageManager::PageManager(Vulkan::Rasterizer* rasterizer_) {
 }
 
 PageManager::~PageManager() = default;
+
+bool PageManager::IsWriteProtected(VAddr address) const {
+    const size_t page = address >> PM_PAGE_BITS;
+    if (page >= Impl::NUM_ADDRESS_PAGES) {
+        return false;
+    }
+    return impl->cached_pages[page].num_write_watchers != 0;
+}
 
 void PageManager::OnGpuMap(VAddr address, size_t size) {
     impl->OnMap(address, size);
