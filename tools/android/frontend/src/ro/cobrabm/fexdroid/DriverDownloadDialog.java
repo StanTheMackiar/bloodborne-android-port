@@ -5,6 +5,7 @@ import android.app.AlertDialog;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.StateListDrawable;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.KeyEvent;
@@ -19,15 +20,16 @@ import java.io.FileInputStream;
 import java.util.List;
 import java.util.concurrent.CancellationException;
 
-/** Downloads a GPU driver from this app's GitHub releases (DriverCatalog; the Turnip for Android
- *  builds): the 5 newest builds, the one for this GPU marked. It opens with the last list it saved, looks for a newer one in the background
+/** Downloads a GPU driver from this app's GitHub releases (DriverCatalog; the Turnip for Android builds for
+ *  Adreno and the PanVK builds for Mali): the 10 newest builds of all of them (never hidden by GPU), the ones for
+ *  this GPU marked, and a build that needs a newer Android than this phone's marked and not installed. It opens with the last list it saved, looks for a newer one in the background
  *  and updates the list in place. A tap downloads the zip with a progress bar, installs it through
  *  DriverManager (which checks it) and offers to use it. Rows take the gamepad (D-pad, A, B) and touch. */
 final class DriverDownloadDialog {
     /** What the dialog needs from the activity. */
     interface Host {
-        /** "main" (Adreno 6xx/7xx), "gen8" (Adreno 8xx) or null when unknown; builds are recommended by
-         *  family (every gen8* variant for "gen8"). Blocks: called off the UI thread. */
+        /** The GPU family (GpuFamily): "main" (Adreno 6xx/7xx), "gen8" (Adreno 8xx), "mali" or null when unknown;
+         *  builds are recommended by family (every gen8* variant for "gen8"). Blocks: called off the UI thread. */
         String gpuVariant();
         /** Selects the driver for the next start (and offers the restart). */
         void use(DriverManager.Driver driver);
@@ -65,8 +67,9 @@ final class DriverDownloadDialog {
         LinearLayout box=new LinearLayout(activity); box.setOrientation(LinearLayout.VERTICAL);
         box.setPadding(dp(24),dp(8),dp(24),dp(8));
         TextView intro=new TextView(activity); intro.setTextSize(13); intro.setAlpha(0.8f);
-        intro.setText("Turnip for Android builds from this app's GitHub releases. A driver you pick "
-            +"here replaces the phone's stock driver; choose System driver again to go back.");
+        intro.setText("Turnip (Adreno) and PanVK (Mali) builds for Android from this app's GitHub releases. "
+            +"A driver you pick here replaces the automatic choice and the phone's own driver; "
+            +"choose Automatic or the phone's own driver again to go back.");
         box.addView(intro);
         note=new TextView(activity); note.setTextSize(13); note.setTextColor(0xffc6ad76);
         note.setPadding(0,dp(8),0,dp(4));
@@ -146,10 +149,13 @@ final class DriverDownloadDialog {
     }
 
     private View row(DriverCatalog.Entry e,List<DriverManager.Driver> installed) {
-        StringBuilder detail=new StringBuilder(e.gpu());
-        if (!e.date().isEmpty()) detail.append(" · ").append(e.date());
-        detail.append(" · ").append(DriverCatalog.megabytes(e.size));
-        if (gpu!=null && e.family().equals(DriverCatalog.family(gpu))) detail.append(" · Recommended for this GPU");
+        StringBuilder detail=new StringBuilder(e.date());
+        if (detail.length()>0) detail.append(" · ");
+        detail.append(DriverCatalog.megabytes(e.size));
+        boolean fits=Build.VERSION.SDK_INT>=e.minApi();
+        detail.append(" · ").append(e.family().equals("mali") ? "Mali only" : e.gpu());
+        if (!fits) detail.append(" · Needs ").append(androidName(e.minApi()));
+        else if (gpu!=null && e.family().equals(DriverCatalog.family(gpu))) detail.append(" · Recommended for this GPU");
         if (installedFor(e,installed)!=null) detail.append(" · Installed");
         LinearLayout row=new LinearLayout(activity); row.setOrientation(LinearLayout.VERTICAL);
         row.setPadding(dp(12),dp(10),dp(12),dp(10));
@@ -180,7 +186,19 @@ final class DriverDownloadDialog {
         return null;
     }
 
+    /** "Android 15 or newer" for an API level. */
+    private static String androidName(int api) {
+        String[] names={"Android 11","Android 12","Android 12L","Android 13","Android 14","Android 15","Android 16"};
+        return (api>=30 && api-30<names.length ? names[api-30] : "Android API "+api)+" or newer";
+    }
+
     private void choose(DriverCatalog.Entry e) {
+        if (Build.VERSION.SDK_INT<e.minApi()) {
+            new AlertDialog.Builder(activity).setTitle("Not for this phone")
+                .setMessage(e.title+" needs "+androidName(e.minApi())+". This phone runs Android API "+Build.VERSION.SDK_INT+".")
+                .setPositiveButton("OK",null).show();
+            return;
+        }
         DriverManager.Driver have=installedFor(e,drivers.list());
         if (have==null) { start(e); return; }
         new AlertDialog.Builder(activity).setTitle("Already installed")
