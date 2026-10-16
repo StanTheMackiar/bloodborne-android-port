@@ -10,6 +10,7 @@ import android.widget.Toast;
 import java.io.File;
 import java.io.UnsupportedEncodingException;
 import java.net.URLEncoder;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.Executor;
@@ -31,6 +32,7 @@ final class ReportDialog {
     private final Activity activity;
     private final Host host;
     private boolean busy;
+    private final Map<String,String> uploaded=new HashMap<>();   // zip path -> link, so a second tap does not upload again
 
     ReportDialog(Activity activity,Host host) { this.activity=activity; this.host=host; }
 
@@ -43,7 +45,9 @@ final class ReportDialog {
                 +"• the game's log of this run and of the run before, and this app's system log\n"
                 +"• the shaders the driver rejected, if any\n\n"
                 +"It does not hold your saves, game files, Lossless.dll or Steam account data. The logs can show folder "
-                +"names on your phone; look through the zip first if that matters to you.")
+                +"names on your phone; look through the zip first if that matters to you.\n\n"
+                +"\"Open GitHub issue\" uploads the zip to a public file host (gofile.io) and links it in the issue. Anyone with the link can "
+                +"open it. \"Share zip\" does not upload anything.")
             .setNegativeButton("Cancel",null)
             .setPositiveButton("Save logs",(d,w) -> build())
             .setOnDismissListener(d -> host.closed()).show();
@@ -75,8 +79,8 @@ final class ReportDialog {
         String where=r.saved!=null ? "Saved to\n"+r.saved.getPath()
             : "Could not copy it to the Download folder ("+r.saveProblem+"). \"Share zip\" still sends it.";
         AlertDialog dialog=new AlertDialog.Builder(activity).setTitle("Logs saved")
-            .setMessage(where+"\n\nOpen a GitHub issue, then drag this zip into its \"Game log\" box"
-                +(r.saved!=null ? " (from your Download folder)" : "")+". \"Share zip\" sends it to another app instead.")
+            .setMessage(where+"\n\n\"Open GitHub issue\" uploads the zip to gofile.io (a public link anyone with it can open) "
+                +"and links it in the issue. \"Share zip\" sends it to another app instead, without uploading.")
             .setPositiveButton("Open GitHub issue",null)
             .setNeutralButton("Share zip",null)
             .setNegativeButton("Close",null)
@@ -87,9 +91,53 @@ final class ReportDialog {
         dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> share(r));
     }
 
+    /** Uploads the zip (once), then opens the issue with its link. */
     private void openIssue(LogReport.Result r) {
-        try { activity.startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(issueUrl(r)))); }
+        if (busy) return;
+        String link=uploaded.get(r.zip.getPath());
+        if (link!=null) { openIssue(r,link); return; }
+        busy=true;
+        ReportUpload.Job job=new ReportUpload.Job();
+        long total=r.zip.length();
+        AlertDialog progress=new AlertDialog.Builder(activity).setTitle("Uploading the logs…")
+            .setMessage("0.0 / "+ReportUpload.megabytes(total)+" MB").setCancelable(false)
+            .setNegativeButton("Cancel",(d,w) -> job.cancel()).show();
+        String agent="Bloodborne-Android/"+version()+" (report upload)";
+        long[] lastPost={0};
+        new Thread(() -> {
+            String url=null, problem=null; boolean cancelled=false;
+            try {
+                url=ReportUpload.upload(r.zip,agent,job,(sent,all) -> {
+                    long now=System.nanoTime();
+                    if (sent<all && now-lastPost[0]<200_000_000L) return;
+                    lastPost[0]=now;
+                    host.post(() -> progress.setMessage(ReportUpload.megabytes(sent)+" / "+ReportUpload.megabytes(all)+" MB"));
+                });
+            } catch (ReportUpload.Cancelled ex) { cancelled=true; }
+            catch (Exception ex) { problem=ex.getMessage()==null ? ex.toString() : ex.getMessage(); }
+            String link2=url, failure=problem; boolean stop=cancelled;
+            host.post(() -> {
+                busy=false; progress.dismiss();
+                if (stop || host.destroyed()) return;
+                if (link2!=null) { uploaded.put(r.zip.getPath(),link2); openIssue(r,link2); }
+                else uploadFailed(r,failure);
+            });
+        },"report-upload").start();
+    }
+    private void uploadFailed(LogReport.Result r,String why) {
+        new AlertDialog.Builder(activity).setTitle("Could not upload the logs")
+            .setMessage(why+"\n\nYou can open the issue anyway and drag the zip into it from your Download folder, or try again.")
+            .setPositiveButton("Open issue without upload",(d,w) -> openIssue(r,null))
+            .setNeutralButton("Try again",(d,w) -> openIssue(r))
+            .setNegativeButton("Close",null).show();
+    }
+    private void openIssue(LogReport.Result r,String link) {
+        try { activity.startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(issueUrl(r,link)))); }
         catch (Exception ex) { Toast.makeText(activity,"No browser to open GitHub: "+ex.getMessage(),Toast.LENGTH_LONG).show(); }
+    }
+    private String version() {
+        try { return activity.getPackageManager().getPackageInfo(activity.getPackageName(),0).versionName; }
+        catch (Exception ex) { return "unknown"; }
     }
     private void share(LogReport.Result r) {
         try {
@@ -114,12 +162,14 @@ final class ReportDialog {
         return map;
     }
     /** The new-issue address for the repository's "Bug report" form (.github/ISSUE_TEMPLATE/bug_report.yml): its fields
-     *  are prefilled by id, and a plain "body" is sent too for the case the form is gone. Under {@link #URL_LIMIT}. */
-    static String issueUrl(LogReport.Result r) {
+     *  are prefilled by id, and a plain "body" is sent too for the case the form is gone. Under {@link #URL_LIMIT}.
+     *  link: where the zip was uploaded, or null for the "drag it into the box" text. */
+    static String issueUrl(LogReport.Result r,String link) {
         Map<String,String> m=lines(r.summary);
         String gpu=m.get("GPU");
         String device=m.get("Device")+(gpu==null || gpu.equals("unknown") ? "" : ", GPU id "+gpu);
-        String attach="Attach "+r.zip.getName()+" from your Download folder (drag it into this box).";
+        String attach=link!=null ? "Logs: "+link+" (uploaded by the app)"
+            : "Attach "+r.zip.getName()+" from your Download folder (drag it into this box).";
         String what="What happened:\n\n\nSteps to reproduce:\n1. \n\nExpected:\n";
         StringBuilder env=new StringBuilder();
         for (Map.Entry<String,String> e:m.entrySet()) env.append("- ").append(e.getKey()).append(": ").append(e.getValue()).append('\n');
