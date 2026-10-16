@@ -13,6 +13,7 @@
 #include <array>
 #include <memory>
 #include <optional>
+#include <span>
 #include <unordered_map>
 #include <boost/container/small_vector.hpp>
 
@@ -367,9 +368,17 @@ private:
     /// Unbinds a VRAM block of memory the game unmapped, or an idle copy (`idle`): uploaded again
     /// if mapped and used. False when the block had no VRAM slot.
     bool EvictVramBlock(u64 block, bool idle = false);
-    /// bbport: copy mode (not GuestInPlace): unbinds the VRAM copies not bound for
-    /// BB_VRAM_IDLE_SECONDS, and those of the emptiest chunk, without GPU-written data.
+    /// bbport: copy mode (not GuestInPlace): returns the VRAM copies not bound for
+    /// BB_VRAM_IDLE_SECONDS, without GPU-written data.
     void ReturnIdleCopies(u32 now);
+    /// bbport: copy mode: empties the emptiest residency chunk for the driver (its copies go).
+    void CompactResidency(u32 now);
+    /// bbport: EvictVramBlock(idle) for each, their BDA page table entries cleared; how many went.
+    u64 ReturnCopies(std::span<const u64> blocks);
+    /// bbport: the block's VRAM copy holds data only the GPU has (it cannot be uploaded again).
+    bool CopyHasGpuData(u64 block);
+    /// bbport: a binding took the block's 2 MiB in the submission being recorded.
+    [[nodiscard]] bool BoundThisTick(u64 block) const;
     /// bbport: chunks without blocks for 5 s go back to the driver.
     void FreeEmptyResidencyChunks(u32 now);
     [[nodiscard]] static u32 VramIdleSeconds();
@@ -626,6 +635,9 @@ private:
     /// go back to the driver (ProcessIdleBlocks). Blocks of unmapped memory leave VRAM too.
     static constexpr u64 USE_GROUP_BITS = 21;
     std::vector<u32> group_use;
+    /// Per 2 MiB, as group_use: the submission (low 32 bits) a binding last took it in.
+    std::vector<u32> group_tick;
+    u64 compact_scan_tick = 0; ///< CompactResidency: the submission it last looked in
     /// Groups with blocks moved in place for idleness, and those blocks: bound again, they get a
     /// VRAM copy again (QueuePromotions). Else the GPU kept reading them over PCIe (FPS 90 -> 55).
     std::vector<u8> group_demoted;
