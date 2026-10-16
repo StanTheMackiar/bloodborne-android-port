@@ -81,9 +81,9 @@ final class PkgInstaller {
 
     // ---- The PKG header ----
 
-    /** The PKG's header facts. */
+    /** The PKG's header facts. pfsOffset/pfsSize: its PFS image (the game's files, encrypted), 0 when it has none. */
     static final class Header {
-        String contentId; long contentType, size; Map<String, Object> sfo;
+        String contentId; long contentType, size, pfsOffset, pfsSize; Map<String, Object> sfo;
     }
 
     /** Reads a PKG's header (big-endian): content id, size, and its unencrypted param.sfo entry (sfo null when it
@@ -105,6 +105,8 @@ final class PkgInstaller {
                 info.contentType = be32(head, 0x74);
                 info.size = be64(head, 0x430);
                 if (Long.compareUnsigned(info.size, fileSize) > 0) throw new Failure("This PKG file is incomplete (the download or copy was cut short)");
+                info.pfsOffset = be64(head, 0x410);
+                info.pfsSize = be64(head, 0x418);
                 long count = be32(head, 0x10), table = be32(head, 0x18);
                 try {
                     file.seek(table);
@@ -134,6 +136,56 @@ final class PkgInstaller {
             throw new Failure("Can't read the PKG: " + FsUtil.strerror(e));
         }
     }
+
+    // ---- Empty parts: a download with pieces missing ----
+
+    /** The PFS image is encrypted and never holds zeros past its header (whose zero pages end before 0x50000). A run of
+     *  zeros there is a part of the file that was never written: a download manager makes the file at full size and
+     *  leaves the pieces that never arrived as zeros, so the size check passes, the tool unpacks those files as zeros
+     *  or noise without an error, and the game hangs on a black screen loading them. One 64 KiB probe every 8 MiB
+     *  past the first MiB; two empty probes in a row (8 MiB of zeros or more) mean missing pieces, so a gap of 16 MiB
+     *  or more is always found. A lone empty probe is not counted. */
+    static final long DATA_SKIP = MIB, DATA_STEP = 8 * MIB;
+    static final int DATA_PROBE = 64 << 10, DATA_PROGRESS_EVERY = 128;
+    static final String DATA_LABEL = "Checking the PKG";
+
+    /** Bytes of `pkg`'s PFS image that its probes found empty (8 MiB per probe in runs of two or more), 0 when none or
+     *  when the header names no PFS image inside the file. Progress `DATA_LABEL` while it reads, only when it reads. */
+    static long emptyData(File pkg, Header info, Progress progress, BooleanSupplier cancelled) throws Failure {
+        long start = info.pfsOffset + DATA_SKIP, end = info.pfsOffset + info.pfsSize;
+        if (info.pfsOffset <= 0 || info.pfsSize <= DATA_SKIP + DATA_PROBE || end < info.pfsOffset || end > info.size) return 0;
+        long probes = (end - DATA_PROBE - start) / DATA_STEP + 1, total = probes * DATA_PROBE;
+        progress.progress(0, total, DATA_LABEL);
+        long empty = 0, run = 0;
+        byte[] block = new byte[DATA_PROBE];
+        try (RandomAccessFile file = new RandomAccessFile(pkg, "r")) {
+            for (long i = 0; i < probes; ++i) {
+                if (cancelled.getAsBoolean()) throw new CancellationException();
+                file.seek(start + i * DATA_STEP);
+                file.readFully(block);
+                boolean zero = true;
+                for (int j = 0; zero && j < block.length; ++j) zero = block[j] == 0;
+                if (zero) ++run;
+                else { if (run >= 2) empty += run * DATA_STEP; run = 0; }
+                if ((i + 1) % DATA_PROGRESS_EVERY == 0 && i + 1 < probes) progress.progress((i + 1) * DATA_PROBE, total, DATA_LABEL);
+            }
+        } catch (IOException e) {
+            throw new Failure("Can't read the PKG: " + FsUtil.strerror(e));
+        }
+        if (run >= 2) empty += run * DATA_STEP;
+        progress.progress(total, total, DATA_LABEL);
+        return empty;
+    }
+
+    /** Failure when the PKG has empty parts (emptyData): before the tool spends minutes unpacking them as zeros. */
+    private void checkData(File pkg, Header info, Progress progress, BooleanSupplier cancelled) throws Failure {
+        long empty = emptyData(pkg, info, progress, cancelled);
+        if (empty == 0) return;
+        log.accept("PKG data check: about " + empty / MIB + " MiB of the PFS image are zeros");
+        throw new Failure("This PKG file is damaged: about " + (empty >= 100 * MIB ? gigabytes(empty) : empty / MIB + " MB")
+            + " of it are empty (zeros), as when parts of a download never arrived. Download it again.");
+    }
+
     private static long be32(byte[] d, int at) { return ((d[at] & 0xffL) << 24) | ((d[at + 1] & 0xffL) << 16) | ((d[at + 2] & 0xffL) << 8) | (d[at + 3] & 0xffL); }
     private static long be64(byte[] d, int at) { return (be32(d, at) << 32) | be32(d, at + 4); }
 
@@ -350,6 +402,7 @@ final class PkgInstaller {
         long need = info.size + MOD_MARGIN;
         if (space.free(modsDir) < need)
             throw new Failure("Not enough free space: " + gigabytes(need) + " needed, " + gigabytes(space.free(modsDir)) + " available");
+        checkData(pkg, info, progress, cancelled);
         File staging = state[0] = newStaging(modsDir);
         runTool(pkg, staging, MOD_MARGIN, modsDir, progress, cancelled);
         progress.progress(0, 0, "Checking");
@@ -539,6 +592,7 @@ final class PkgInstaller {
         long need = info.size + GAME_MARGIN;
         if (space.free(parent) < need)
             throw new Failure("Not enough free space: " + gigabytes(need) + " needed, " + gigabytes(space.free(parent)) + " available");
+        checkData(pkg, info, progress, cancelled);
         File staging = state[0] = newStaging(parent);
         runTool(pkg, staging, GAME_MARGIN, parent, progress, cancelled);
         progress.progress(0, 0, "Installing");
