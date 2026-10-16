@@ -156,7 +156,7 @@ final class FrameGenDialog {
                 String flowScale=String.format(Locale.ROOT,"%.2f",0.25f+flow.getProgress()*0.05f);
                 boolean fast=performance.isChecked();
                 Map<String,String> changed=new LinkedHashMap<>();
-                changed.put("lsfg_multiplier",VALUES[m]);
+                changed.put("lsfg_multiplier",String.valueOf(m));
                 changed.put("lsfg_flow_scale",flowScale);
                 changed.put("lsfg_performance",fast ? "1" : "0");
                 // The running game follows lsfg.state (libbbgpu reads it): no restart.
