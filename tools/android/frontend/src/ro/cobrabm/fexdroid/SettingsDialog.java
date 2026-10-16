@@ -55,6 +55,7 @@ final class SettingsDialog {
     private static final String[][] GAME_PATCHES={
         {"skip_network_choice","Skip the online/offline screen","Start straight at the main menu, offline (there is no PSN here)","1"},
         {"skip_intro","Skip startup intros","The logos and intro movie at start","0"},
+        {"skip_opening_movie","Skip the opening movie","The movie before character creation, which crashes the game on some phones when it ends (issue #17)","1"},
         {"debug_camera","Free camera","Toggle it with Cross + L3","0"},
         {"debug_menu","Debug menu","The game's own debug menu; needs its font files","0"},
     };

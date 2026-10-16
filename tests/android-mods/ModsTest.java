@@ -343,6 +343,76 @@ public final class ModsTest {
         });
     }
 
+    // ---------------------------------------------------------------- MovieSkip
+
+    interface WithMovieGame { void run(File root, File game, File out) throws Exception; }
+    static void movieGame(String name, WithMovieGame body) {
+        test(name, () -> {
+            File root = temp();
+            try {
+                File game = new File(root, "CUSA03173");
+                write(new File(game, "eboot.bin"), "eboot");
+                write(new File(game, "sce_sys/param.sfo"), "sfo");
+                write(new File(game, "dvdroot_ps4/movie/sprj_opening.mp4"), "opening");
+                write(new File(game, "dvdroot_ps4/movie/sprj_staffroll.mp4"), "staffroll");
+                write(new File(game, "dvdroot_ps4/chr/c0000.anibnd.dcx"), "chr");
+                body.run(root, game, new File(root, "movie-game"));
+            } finally { delete(root); }
+        });
+    }
+
+    static void movieSkipTests() {
+        movieGame("movie_skip_hides_the_opening_and_links_the_rest", (root, game, out) -> {
+            List<String> log = new ArrayList<>();
+            File app0 = MovieSkip.apply(game, out, MovieSkip.OPENING, log::add);
+            eq(out.getPath(), app0.getPath());
+            eq(list("dvdroot_ps4", "eboot.bin", "sce_sys"), names(app0));
+            no(new File(app0, "dvdroot_ps4/movie/sprj_opening.mp4").exists());
+            eq("staffroll", text(new File(app0, "dvdroot_ps4/movie/sprj_staffroll.mp4")));
+            eq("chr", text(new File(app0, "dvdroot_ps4/chr/c0000.anibnd.dcx")));
+            eq("eboot", text(new File(app0, "eboot.bin")));
+            // Only the folders on the way are made: the others are links to the game's.
+            yes(Files.isSymbolicLink(new File(app0, "dvdroot_ps4/chr").toPath()));
+            yes(Files.isSymbolicLink(new File(app0, "sce_sys").toPath()));
+            no(Files.isSymbolicLink(new File(app0, "dvdroot_ps4/movie").toPath()));
+            eq(list("Movies: 1 hidden from the game (dvdroot_ps4/movie/sprj_opening.mp4)"), log);
+            // The game folder is untouched.
+            eq("opening", text(new File(game, "dvdroot_ps4/movie/sprj_opening.mp4")));
+        });
+        movieGame("movie_skip_matches_names_ignoring_case_and_rebuilds", (root, game, out) -> {
+            new File(game, "dvdroot_ps4/movie/sprj_opening.mp4").renameTo(new File(game, "dvdroot_ps4/movie/SPRJ_Opening.MP4"));
+            new File(game, "dvdroot_ps4/movie").renameTo(new File(game, "dvdroot_ps4/Movie"));
+            write(new File(out, "stale"), "old overlay");
+            File app0 = MovieSkip.apply(game, out, MovieSkip.OPENING, s -> {});
+            eq(list("sprj_staffroll.mp4"), names(new File(app0, "dvdroot_ps4/Movie")));
+            no(new File(out, "stale").exists());
+        });
+        movieGame("movie_skip_without_the_movie_returns_the_game", (root, game, out) -> {
+            new File(game, "dvdroot_ps4/movie/sprj_opening.mp4").renameTo(new File(game, "dvdroot_ps4/movie/sprj_opening.mp4.disabled"));
+            write(new File(out, "stale"), "old overlay");
+            List<String> log = new ArrayList<>();
+            eq(game.getPath(), MovieSkip.apply(game, out, MovieSkip.OPENING, log::add).getPath());
+            no(out.exists());
+            contains(String.join("\n", log), "not in the game folder, nothing to hide");
+        });
+        movieGame("movie_skip_over_a_mods_overlay", (root, game, out) -> {
+            // The mods overlay is itself a folder of links over the game.
+            File mods = new File(root, "mod-game");
+            mods.mkdirs();
+            for (String n : names(game)) Files.createSymbolicLink(new File(mods, n).toPath(), new File(game, n).toPath());
+            File app0 = MovieSkip.apply(mods, out, MovieSkip.OPENING, s -> {});
+            eq(out.getPath(), app0.getPath());
+            no(new File(app0, "dvdroot_ps4/movie/sprj_opening.mp4").exists());
+            eq("staffroll", text(new File(app0, "dvdroot_ps4/movie/sprj_staffroll.mp4")));
+        });
+        movieGame("movie_skip_missing_game_folder_starts_unchanged", (root, game, out) -> {
+            File nope = new File(root, "nope");
+            List<String> log = new ArrayList<>();
+            eq(nope.getPath(), MovieSkip.apply(nope, out, MovieSkip.OPENING, log::add).getPath());
+            contains(String.join("\n", log), "Movies: could not hide them");
+        });
+    }
+
     // ---------------------------------------------------------------- small pieces
 
     static byte[] sfo(String... kv) {
@@ -1038,7 +1108,7 @@ public final class ModsTest {
     }
 
     public static void main(String[] args) {
-        modsAndroidTests(); modsPyTests(); sfoTests(); installPkgTests(); installGameTests(); gameCheckTests(); realTests();
+        modsAndroidTests(); modsPyTests(); sfoTests(); installPkgTests(); installGameTests(); gameCheckTests(); movieSkipTests(); realTests();
         System.exit(T.finish());
     }
 }

@@ -312,6 +312,7 @@ public final class MainActivity extends Activity {
         java.util.List<String> game=new java.util.ArrayList<>();
         if (!"0".equals(setting("skip_network_choice"))) game.add("Offline start");
         if ("1".equals(setting("skip_intro"))) game.add("no intros");
+        if (!"0".equals(setting("skip_opening_movie"))) game.add("no opening movie");
         if ("1".equals(setting("debug_camera"))) game.add("free camera");
         if ("1".equals(setting("debug_menu"))) game.add("debug menu");
         setDetail(gameSettingsItem,game.isEmpty() ? "Online/offline screen shown" : String.join(" · ",game));
@@ -847,6 +848,13 @@ public final class MainActivity extends Activity {
         }
         return folder;
     }
+    /** The folder to run from with the opening movie hidden (skip_opening_movie, on unless set to 0; MovieSkip):
+     *  the movie player crashes the game when that movie ends or is skipped on some phones (issue #17). */
+    private String hideMovies(String app0,java.util.List<String> log) {
+        File overlay=new File(BASE,"movie-game");
+        if ("0".equals(setting("skip_opening_movie"))) { FsUtil.deleteTree(overlay); return app0; }
+        return MovieSkip.apply(new File(app0),overlay,MovieSkip.OPENING,log::add).getPath();
+    }
     private void startPending() {
         SurfaceHolder h=pendingHolder!=null ? pendingHolder : surface.getHolder();
         pendingHolder=null;
@@ -1107,6 +1115,7 @@ public final class MainActivity extends Activity {
             // The game folder with the mods merged over it: the launch script takes it from BB_APP0_DIR.
             java.util.List<String> modsLog=new java.util.ArrayList<>();
             String app0=prepareMods(modsLog);
+            if (app0!=null) app0=hideMovies(app0,modsLog);
             for (String line:modsLog) android.util.Log.i("Bloodborne",line);
             java.util.List<String> extra=new java.util.ArrayList<>();
             if (app0!=null) extra.add("BB_APP0_DIR="+app0);
