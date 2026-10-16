@@ -122,6 +122,11 @@ public:
     /// bbport: a guest thread wrote [addr, addr + size) with a libc import (memcpy, memset, memmove)
     /// over pages the caches watch (no write tracking): what a write fault did.
     void OnCpuWrite(VAddr addr, u64 size);
+    /// bbport BB_FAULT_PREPARE: a guest thread is about to write [addr, addr + size) with a libc
+    /// import over pages the page manager write-protects: what a write fault on each of them would
+    /// do (invalidate, unprotect, the faulting window), done once for the range, so the write
+    /// does not fault.
+    void OnCpuWritePrepare(VAddr addr, u64 size);
     /// GPU thread, before a write the guest can observe (see Scheduler::WaitHostCopies).
     void WaitHostCopies() {
         DrainDrawPipe();
@@ -664,6 +669,12 @@ private:
     PendingReads pending_reads;
     PendingReads pending_write_table; ///< the same per granule for GPU writes queued (NotePendingGpuWrite)
     u64 untracked_reads_packet = 0; ///< newest packet reading guest memory it does not list
+    /// bbport (BB_FAULT_DRAIN): the guest memory queued packets read, per granule like pending_reads
+    /// but for everything the recording thread reads (buffers, images, targets); noted from the first
+    /// write fault on the GPU command thread on (that one drains).
+    PendingReads fault_reads;
+    u64 fault_unknown_packet = 0; ///< newest packet whose reads are not all listed
+    bool fault_tracking = false;
     u64 constram_waits_skipped = 0; ///< statistics: CPU writes that did not have to wait
     u64 proxy_samples = 0; ///< texture bindings that read a scene proxy (statistics)
     float sampler_lod_bias = 0.0f; ///< bbport: extra bias of this draw's samplers
@@ -671,6 +682,20 @@ private:
     bool scene_debug_frame = false; ///< BB_SCENE_DEBUG: this frame's passes are printed
     u32 preupload_frame = ~0u; ///< bbport: frame of the last background pre-upload
     bool PendingWriteOverlaps(VAddr address, u64 size);
+    /// bbport (BB_FAULT_DRAIN): before a write fault of the GPU command thread changes the caches
+    /// for [addr, addr + size): waits for the draw recording thread only when a queued packet may
+    /// read those pages (else it would upload the bytes the CPU is about to write). Other threads
+    /// do not wait (DrainDrawPipe is for stage A).
+    void DrainForCpuWrite(VAddr addr, u64 size);
+    /// InvalidateMemory for a caller that drained (or decided not to) already.
+    bool InvalidateMemoryUndrained(VAddr addr, u64 size, bool assume_locks);
+    /// Stage A, once a write fault made it track what queued packets read (fault_tracking): the guest
+    /// memory the packet being built (NextPacket) reads on the recording thread, a conservative
+    /// upper bound; `fault_unknown_packet` for what is not listed.
+    void NoteFaultRead(VAddr address, u64 size);
+    void NoteFaultStageReads(const Shader::Info& stage);
+    void NoteFaultImage(const AmdGpu::Image& sharp);
+    void NoteFaultTargets();
     /// Stage B: the ring bindings of the stages of the packet being recorded.
     struct RingStage {
         const Shader::Info* info;

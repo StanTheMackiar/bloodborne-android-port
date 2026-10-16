@@ -251,6 +251,10 @@ public final class MainActivity extends Activity {
         section("App");
         updateItem=menuItem("ic_refresh","Check for updates","Version "+updater.version(),() -> updater.check());
         menuItem("ic_bug_report","Report a problem","Save logs for a GitHub issue",() -> { closeDrawer(); report.show(); });
+        menuItem("ic_tune","Debug options","Performance switches for testing",() -> {
+            closeDrawer();
+            new DebugDialog(this,new SettingsDialog(this,new File(BASE,"bbport.ini"),this::restartGame),this::restartGame).show();
+        });
 
         // The version, pinned under the scrolling menu.
         String version="";

@@ -15,6 +15,7 @@
 #include "common/assert.h"
 #include "bbport_adpf.h"
 #include "bbport_toggles.h"
+#include "bbport_fault.h"
 #include "bbport_heap_sites.h"
 #include "bbport_wait_trace.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
@@ -635,6 +636,27 @@ void VideoOutDriver::Flip(const Request& req) {
                 std::printf("Write notices: %.0f/s, %.2f MB/s (libc copies over pages the GPU side "
                             "watches)\n",
                             notes / window, BbStats::cpu_write_note_bytes.exchange(0) / (window * 1e6));
+            }
+            {
+                const u64 ranges = BbFault::prepare_ranges.exchange(0),
+                          pages = BbFault::prepare_pages.exchange(0),
+                          done = BbFault::drains_done.exchange(0),
+                          skipped = BbFault::drains_skipped.exchange(0),
+                          waits = BbFault::lock_waits.exchange(0),
+                          fault_waits = BbFault::fault_lock_waits.exchange(0),
+                          sleeps = BbFault::lock_sleeps.exchange(0);
+                const double prepare_ms = BbFault::prepare_ns.exchange(0) / 1e6,
+                             wait_ms = BbFault::lock_wait_ns.exchange(0) / 1e6,
+                             fault_wait_ms = BbFault::fault_lock_wait_ns.exchange(0) / 1e6;
+                if (ranges || done || skipped || waits) {
+                    std::printf("Write fault tracking: %.0f/s ranges announced before HLE writes "
+                                "(%.0f pages/s = faults avoided, %.1f ms/s); GPU thread write faults "
+                                "drained the draw pipe %.0f/s, skipped %.0f/s; lock waits %.0f/s "
+                                "(%.1f ms/s, %.0f/s asleep), on the fault path %.0f/s (%.1f ms/s)\n",
+                                ranges / window, pages / window, prepare_ms / window, done / window,
+                                skipped / window, waits / window, wait_ms / window, sleeps / window,
+                                fault_waits / window, fault_wait_ms / window);
+                }
             }
             Vulkan::Breadcrumbs::PrintProgress();
             PrintMemory();

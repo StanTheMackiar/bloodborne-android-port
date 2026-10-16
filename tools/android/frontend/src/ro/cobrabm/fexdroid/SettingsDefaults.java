@@ -74,10 +74,34 @@ final class SettingsDefaults {
         } catch (Exception e) { return 0; }
     }
 
+    /** 0.9.4: the write-fault fixes (Debug options) are on for everyone. Test builds before it could save them
+     *  off (debug_fault_* = 0); once, those lines are removed so the defaults (on) apply. The marker holds 1. */
+    private static final String FAULT_MARKER="debug_fault_defaults";
+    static void resetFaultSwitches(File base) throws IOException {
+        File marker=new File(base,FAULT_MARKER), ini=new File(base,"bbport.ini");
+        if (revision(marker)>=1) return;
+        if (ini.isFile()) {
+            List<String> out=new ArrayList<>();
+            int removed=0;
+            for (String line:lines(ini)) {
+                String key=keyOf(line);
+                if (key!=null && key.startsWith("debug_fault_")) { ++removed; continue; }
+                out.add(line);
+            }
+            if (removed>0) {
+                write(ini,out);
+                android.util.Log.i("Bloodborne","write-fault fixes back on by default ("+removed+" debug_fault_* settings removed)");
+            }
+        }
+        List<String> mark=new ArrayList<>(); mark.add("1");
+        write(marker,mark);
+    }
+
     /** Applies the defaults in base (the bbport directory) when this revision has not been yet. Does
      *  nothing, and writes no marker, while the defaults file is missing. Throws when the files cannot
      *  be written; the marker is last, so the next start tries again. */
     static void apply(File base) throws IOException {
+        resetFaultSwitches(base);
         File marker=new File(base,MARKER), ini=new File(base,"bbport.ini"), defaults=new File(base,"bbport.default.ini");
         if (revision(marker)>=REVISION || !defaults.isFile()) return;
         List<String> wantedLines=lines(defaults);

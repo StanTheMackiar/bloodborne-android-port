@@ -779,6 +779,43 @@ void runtime_memory_set_write_watch(uintptr_t address, uint64_t size, int watch)
         else atomic_fetch_and_explicit(&write_watch[word],~mask,memory_order_release);
     }
 }
+/* bbport BB_FAULT_PREPARE (default on): the pages the GPU side's page manager write-protects (the
+ * buffer and texture caches' watchers, copy memory model), one bit per 4 KiB page below 2^40, kept by
+ * the page manager next to its mprotect calls. A bulk write the runtime does for the game (memcpy,
+ * memset, memmove) asks it first (runtime_memory_prepare_cpu_write): when a page of the range is
+ * protected, the GPU side does once, for the range, what each page's write fault would do, and the
+ * copy runs without faults. A stale bit costs one call, a missing one the fault as before. */
+static _Atomic(uint64_t) *protect_map;
+static GpuRange hook_prepare_write;
+void runtime_memory_set_prepare_write_hook(GpuRange hook) {
+    if (!protect_map) {
+        void *bits=mmap(NULL,WATCH_LIMIT>>15,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,-1,0);
+        if (bits==MAP_FAILED) { perror("bbport: protected pages bitmap"); return; }
+        protect_map=bits;
+    }
+    hook_prepare_write=hook;
+}
+void runtime_memory_set_page_protected(uintptr_t address, uint64_t size, int is_protected) {
+    if (!protect_map || !size || address>=WATCH_LIMIT) return;
+    uint64_t first=address>>12, last=(address+size-1)>>12;
+    if (last>=(WATCH_LIMIT>>12)) last=(WATCH_LIMIT>>12)-1;
+    for (uint64_t word=first>>6; word<=last>>6; ++word) {
+        const uint64_t lo=word==first>>6 ? first&63 : 0, hi=word==last>>6 ? last&63 : 63;
+        const uint64_t mask=(hi==63 ? ~0ull : (2ull<<hi)-1) & ~((1ull<<lo)-1);
+        if (is_protected) atomic_fetch_or_explicit(&protect_map[word],mask,memory_order_release);
+        else atomic_fetch_and_explicit(&protect_map[word],~mask,memory_order_release);
+    }
+}
+static int any_page_protected(uintptr_t address, uint64_t size) {
+    if (!protect_map || !size || address>=WATCH_LIMIT || size>WATCH_LIMIT-address) return 0;
+    const uint64_t first=address>>12, last=(address+size-1)>>12;
+    for (uint64_t word=first>>6; word<=last>>6; ++word) {
+        const uint64_t lo=word==first>>6 ? first&63 : 0, hi=word==last>>6 ? last&63 : 63;
+        const uint64_t mask=(hi==63 ? ~0ull : (2ull<<hi)-1) & ~((1ull<<lo)-1);
+        if (atomic_load_explicit(&protect_map[word],memory_order_acquire) & mask) return 1;
+    }
+    return 0;
+}
 void runtime_memory_note_cpu_write(uintptr_t address, uint64_t size) {
     if (!write_watch || !size || address>=WATCH_LIMIT || address+size>WATCH_LIMIT) return;
     const uint64_t first=address>>12, last=(address+size-1)>>12;
@@ -868,6 +905,8 @@ void runtime_memory_trap(uintptr_t address, uint64_t size, unsigned reason, int 
  * thread has queued; libc copies into small textures every frame made the game's frames late).
  * Its announcement after the write (runtime_memory_note_cpu_write) stays as it was. */
 void runtime_memory_prepare_cpu_write(uintptr_t address, uint64_t size) {
+    /* The page manager's protected pages first (BB_FAULT_PREPARE): the range's write faults in one call. */
+    if (hook_prepare_write && any_page_protected(address,size)) hook_prepare_write(address,size);
     const uint8_t *table=__atomic_load_n(&trap_reasons,__ATOMIC_ACQUIRE);
     if (!table || !size || address>=TRAP_LIMIT || !hook_cpu_write) return;
     uint64_t last=(address+size-1)>>12;

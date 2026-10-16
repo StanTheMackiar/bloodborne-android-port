@@ -818,15 +818,20 @@ void BufferCache::SmallGuestCopy(const BbCopy::Item& item) {
     scheduler.NoteHostCopySource(item.source, item.size);
 }
 
-void BufferCache::ExtendWriteFault(VAddr device_addr, u64 guest_rip) {
-    if (GuestInPlace()) {
-        NoteCpuWrite(device_addr, guest_rip);
-    }
+u64 BufferCache::FaultWindowBytes() {
     static const u64 window = [] {
         const char* env = std::getenv("BB_FAULT_WINDOW");
         const u64 kib = env ? std::strtoull(env, nullptr, 10) : 256;
         return std::bit_ceil(std::clamp<u64>(kib, 4, 1024)) * 1024;
     }();
+    return window;
+}
+
+void BufferCache::ExtendWriteFault(VAddr device_addr, u64 guest_rip) {
+    if (GuestInPlace()) {
+        NoteCpuWrite(device_addr, guest_rip);
+    }
+    const u64 window = FaultWindowBytes();
     if (window <= TRACKER_BYTES_PER_PAGE || BbToggle::Disabled(BbToggle::FaultWindow)) {
         return;
     }
