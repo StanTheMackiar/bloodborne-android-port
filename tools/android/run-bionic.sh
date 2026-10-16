@@ -1,7 +1,8 @@
 #!/system/bin/sh
 # Runs inside the app's sandbox (started by MainActivity.java with /system/bin/sh): the game process,
 # bb-probe with libbbgpu/libbbcpu (an Android NDK build), from the app's data directory. It uses the
-# phone's own Vulkan driver, or an adrenotools-style one the player installed (files/drivers/<name>/).
+# phone's own Vulkan driver, or an adrenotools-style one (files/drivers/<name>/: the app's bundled driver for
+# the GPU, picked automatically, or one the player installed).
 # The game files are prepared by bb-prepare, the mods overlay is built by the app (BB_APP0_DIR): no
 # Python, no rootfs, no X server. libbbgpu presents through the app (BB_PRESENT_SOCKET).
 # Only Android's own tools run here (toybox: sed, tail, cat, cp, mkdir, printf, rm, taskset).
@@ -146,11 +147,33 @@ if [ "$(setting vsync)" = 1 ]; then export BB_VSYNC=1; else export BB_VSYNC=0; f
 [ -z "${BB_THOR_CPUS:-}" ] && BB_THOR_CPUS=$(setting thor_cpus)
 
 # ---- The GPU driver (bbport.ini gpu_driver) ----
-# Empty or "system" is the phone's stock driver through its Vulkan loader (BB_VULKAN_DRIVER unset);
-# else files/drivers/<name>/ made by DriverManager.java, whose driver.lib names the library (an
-# adrenotools-style Turnip for Android), loaded directly.
+# "system" is the phone's stock driver through its Vulkan loader (BB_VULKAN_DRIVER unset); an id is
+# files/drivers/<name>/ made by DriverManager.java, whose driver.lib names the library (an
+# adrenotools-style Turnip / PanVK for Android), loaded directly. Empty, "auto", or an id whose folder is
+# gone: the automatic choice, the driver the app resolved for this GPU and named in BB_GPU_DRIVER (it installs
+# the one bundled in the APK; AutoDriver.java; BB_GPU_DRIVER_WHY is its log line), else the stock driver.
 gpu_driver=$(setting gpu_driver)
-case $gpu_driver in .*|*/*|system) gpu_driver= ;; esac
+gpu_auto=0
+case $gpu_driver in
+    ''|auto) gpu_auto=1; gpu_driver= ;;
+    .*|*/*|system) gpu_driver= ;;
+    *) if [ ! -f "$files/drivers/$gpu_driver/driver.lib" ]; then
+           echo "GPU driver $gpu_driver is gone: automatic choice"; gpu_auto=1; gpu_driver=
+       fi ;;
+esac
+if [ "$gpu_auto" = 1 ]; then
+    gpu_pick=${BB_GPU_DRIVER:-}
+    case $gpu_pick in ''|.*|*/*|system) gpu_pick= ;; esac
+    if [ -n "$gpu_pick" ] && [ -f "$files/drivers/$gpu_pick/driver.lib" ]; then
+        gpu_driver=$gpu_pick
+        echo "GPU driver: automatic -> $gpu_pick (${BB_GPU_DRIVER_WHY:-no reason given})"
+    elif [ -n "${BB_GPU_DRIVER:-}" ] && [ "$BB_GPU_DRIVER" != system ]; then
+        echo "GPU driver: automatic -> system (stock): the app's choice $BB_GPU_DRIVER is not installed"
+    else
+        echo "GPU driver: automatic -> system (stock): ${BB_GPU_DRIVER_WHY:-the app did not name a driver}"
+    fi
+fi
+unset BB_GPU_DRIVER BB_GPU_DRIVER_WHY
 unset BB_VULKAN_DRIVER
 if [ -n "$gpu_driver" ]; then
     driver_lib=$(cat "$files/drivers/$gpu_driver/driver.lib" 2>/dev/null || true)

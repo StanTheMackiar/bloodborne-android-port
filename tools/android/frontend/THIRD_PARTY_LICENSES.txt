@@ -2,9 +2,11 @@ fexdroid: https://github.com/cobrabm12/fexdroid (MIT License, below). The app's
 Java package name comes from it; the display and input bridge libraries of earlier
 releases (libfxdisplay, libfxio) are no longer included.
 
-GPU drivers: the app contains none. Turnip for Android builds the player installs
-or downloads from this project's GitHub releases are Mesa (MIT,
-https://gitlab.freedesktop.org/mesa/mesa; the Adreno 8xx variant from
+GPU drivers: the app carries three, unchanged, as assets/drivers/*.zip, and installs
+the one for the phone's GPU when "Automatic" is the GPU driver setting; the notices for
+them are at the end of this file (GPU drivers bundled in the app). Other Turnip for
+Android builds the player installs or downloads from this project's GitHub releases are
+Mesa (MIT, https://gitlab.freedesktop.org/mesa/mesa; the Adreno 8xx variant from
 https://github.com/whitebelyash/mesa-unified, turnip/gen8, MIT), with this
 project's patches (tools/android/mesa-patches in the source).
 

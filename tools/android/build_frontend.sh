@@ -31,7 +31,25 @@ if icon.exists():
     (out/'res/drawable/icon.xml').unlink(missing_ok=True)
     Image.open(icon).save(out/'res/drawable/icon.png')
 PY
-cp tools/android/frontend/THIRD_PARTY_LICENSES.txt "$out/assets/"
+# The GPU drivers inside the APK (assets/drivers/, installed by the app's Automatic GPU driver choice:
+# AutoDriver.java, BundledDrivers.java) with their licence notices appended to THIRD_PARTY_LICENSES.txt.
+# fetch_bundled_drivers.sh downloads and checks the pinned zips (BB_SKIP_DRIVERS=1: a development build
+# without them, which uses the phone's own driver when Automatic cannot install one).
+drivers=$PWD/.local-deps/android/drivers
+if [[ ${BB_SKIP_DRIVERS:-} != 1 ]]; then
+    bash tools/android/fetch_bundled_drivers.sh >/dev/null \
+        || { echo "The bundled GPU drivers are missing or do not match their sha256: bash tools/android/fetch_bundled_drivers.sh (BB_SKIP_DRIVERS=1 builds without them)" >&2; exit 1; }
+    mkdir -p "$out/assets/drivers"
+    cp "$drivers"/Turnip-android-main-26.3.0-35b085c.zip "$drivers"/Turnip_Gen8_V37.zip \
+       "$drivers"/PanVK-android-v3.2-universal-2a9358a.zip "$out/assets/drivers/"
+    { cat tools/android/frontend/THIRD_PARTY_LICENSES.txt tools/android/frontend/DRIVERS_NOTICE.txt
+      unzip -p "$drivers/Turnip-android-main-26.3.0-35b085c.zip" LICENSE-mesa.txt
+      printf '\n--------------------------------------------------------------------------------\nGNU General Public License, version 3 (StevenMXZ/Adreno-Tools-Drivers)\n--------------------------------------------------------------------------------\n\n'
+      cat "$drivers/GPL-3.0.txt"
+    } > "$out/assets/THIRD_PARTY_LICENSES.txt"
+else
+    cp tools/android/frontend/THIRD_PARTY_LICENSES.txt "$out/assets/"
+fi
 # The libraries of the Steam sign-in that downloads Lossless.dll (SteamDllDialog.java: JavaSteam and its
 # dependencies, ZXing, zstd-jni) and of the Mods menu (ModArchive.java: Commons Compress and xz).
 steam_libs=$PWD/.local-deps/android/steam-libs
@@ -53,7 +71,7 @@ javac --release 8 -classpath "$android_jar:$(IFS=:; echo "${lib_jars[*]}")" -d "
 mapfile -t classes < <(rg --files "$out/classes" -g '*.class')
 "$build_tools/d8" --release --min-api 28 --lib "$android_jar" --output "$out/dex" "${classes[@]}" "${lib_jars[@]}"
 "$build_tools/aapt" package -f -M tools/android/frontend/AndroidManifest.xml \
-    -S "$out/res" -A "$out/assets" -I "$android_jar" -0 payload -F "$out/unsigned.apk"
+    -S "$out/res" -A "$out/assets" -I "$android_jar" -0 payload -0 zip -F "$out/unsigned.apk"
 python3 - "$out" <<'PY'
 import sys, zipfile
 from pathlib import Path

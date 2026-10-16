@@ -19,8 +19,9 @@ import org.json.JSONObject;
 
 /** Vulkan drivers the player installs from a zip, beside the phone's own driver.
  *  Each one lives in files/drivers/<id>/: the zip's libraries, driver.json (its name and version) and
- *  driver.lib (the file name of the library to load). bbport.ini gpu_driver=<id> picks one (empty or
- *  "system": none, the phone's stock driver).
+ *  driver.lib (the file name of the library to load). bbport.ini gpu_driver=<id> picks one ("system": none,
+ *  the phone's stock driver; "auto", or empty: the driver bundled in the APK for the GPU, AutoDriver, which
+ *  installs it here through install() too).
  *
  *  They are Android builds (adrenotools-style zips: meta.json with libraryName, and the .so, such as our
  *  Turnip for Android); run-bionic.sh passes the library to libbbgpu as BB_VULKAN_DRIVER, which dlopens it.
@@ -63,10 +64,19 @@ final class DriverManager {
         return null;
     }
     void delete(String id) throws IOException { if (valid(id)) deleteTree(new File(dir,id)); }
+    /** Whether the driver's folder still has the library driver.lib names (an interrupted delete or a cleaned
+     *  cache can leave less). */
+    boolean intact(String id) {
+        if (!valid(id)) return false;
+        try {
+            String library=new String(Files.readAllBytes(new File(new File(dir,id),"driver.lib").toPath()),StandardCharsets.UTF_8).trim();
+            return androidLibraryName(library) && new File(new File(dir,id),library).isFile();
+        } catch (IOException e) { return false; }
+    }
 
     /** Unpacks a driver zip (named zipName, for the driver's name when it has none), checks it and
      *  installs it. Returns the new driver; an IOException's message says what is wrong with the zip. */
-    Driver install(InputStream in,String zipName) throws IOException {
+    synchronized Driver install(InputStream in,String zipName) throws IOException {
         return installAndroid(in,zipName);
     }
 

@@ -64,6 +64,13 @@ public final class MainActivity extends Activity {
     /** Vulkan drivers installed from zips (the GPU driver menu). */
     private DriverManager drivers;
     private DriverDownloadDialog driverDownload;
+    /** The phone's GPU family (cached once the runtime can read it), what auto resolved to at the last start (for
+     *  the problem report), whether the one-time notice about it was shown, and whether the drawer started the
+     *  detection (it runs a process: off the UI thread). */
+    private volatile GpuFamily gpu;
+    private volatile String autoLine;
+    private volatile boolean autoNoticeShown;
+    private final AtomicBoolean gpuProbing=new AtomicBoolean();
     private ModsDialog mods;
     private GameInstaller installer;
     private AppUpdater updater;
@@ -319,8 +326,14 @@ public final class MainActivity extends Activity {
             : (limit==null || !limit.matches("40|45|60") ? "30" : limit)+" FPS limit"));
         setDetail(frameGenItem,FrameGenDialog.summary(setting("frame_generation"),setting("upscaler"),setting("lsfg_multiplier"),
             losslessDll()!=null));
-        DriverManager.Driver driver=drivers.find(setting("gpu_driver"));
-        setDetail(driverItem,driver==null ? "System driver (stock)" : driver.title());
+        String choice=gpuSetting();
+        DriverManager.Driver driver=drivers.find(choice);
+        if (choice.equals("auto") && gpu==null && gpuProbing.compareAndSet(false,true)) {
+            Thread probe=new Thread(() -> { gpu(); main.post(() -> { if (!destroyed && drawerOpen) refreshDrawer(); }); },"Gpu-probe");
+            probe.setDaemon(true); probe.start();
+        }
+        setDetail(driverItem,choice.equals("auto") ? "Automatic: "+AutoDriver.describe(gpu,Build.VERSION.SDK_INT)
+            : driver==null ? "Phone's own driver" : driver.title());
         setDetail(controllerItem,controllerEnabled() ? "On" : "Off");
         setDetail(folderItem,gameDir==null ? "Not chosen" : gameDir);
     }
@@ -705,8 +718,12 @@ public final class MainActivity extends Activity {
     private LogReport.Facts reportFacts() {
         LogReport.Facts f=new LogReport.Facts();
         if (gameDir!=null) { f.gameFolder=new File(gameDir).getName(); f.ebootFound=isGame(new File(gameDir)); }
-        DriverManager.Driver driver=drivers.find(setting("gpu_driver"));
-        f.driverLine=driver==null ? "system (stock)" : driver.title();
+        String choice=gpuSetting();
+        DriverManager.Driver driver=drivers.find(choice);
+        GpuFamily detected=gpu;
+        f.driverLine=choice.equals("auto") ? "auto (setting gpu_driver="+(setting("gpu_driver")==null ? "" : setting("gpu_driver"))+"): "
+                +(autoLine!=null ? autoLine : AutoDriver.describe(detected,Build.VERSION.SDK_INT)+" (not resolved yet)")
+            : driver==null ? "system (stock), setting gpu_driver=system" : driver.title()+" (setting gpu_driver="+driver.id+")";
         f.losslessDll=losslessDll()!=null;
         if ("0".equals(setting("mods_enabled"))) f.modsLine="off";
         else {
@@ -889,28 +906,62 @@ public final class MainActivity extends Activity {
     }
     // ---- GPU driver: the phone's own or one installed from a zip (DriverManager, run-bionic.sh) ----
     private void showDrivers() {
+        if (gpu==null) { // the GPU family names what Automatic is: found off the UI thread
+            Thread probe=new Thread(() -> { gpu(); main.post(() -> { if (!destroyed) showDriversDialog(); }); },"Gpu-probe");
+            probe.setDaemon(true); probe.start();
+        } else showDriversDialog();
+    }
+    private void showDriversDialog() {
         java.util.List<DriverManager.Driver> list=drivers.list();
-        DriverManager.Driver current=drivers.find(setting("gpu_driver"));
-        String[] names=new String[list.size()+1];
-        names[0]="System driver (stock)";
-        int checked=0;
+        String setting=gpuSetting();
+        DriverManager.Driver current=drivers.find(setting);
+        // Automatic (with what it is on this phone), the phone's own driver, then the installed ones.
+        CharSequence[] names=new CharSequence[list.size()+2];
+        String automatic="Automatic (recommended)", resolves=AutoDriver.describe(gpu,Build.VERSION.SDK_INT);
+        android.text.SpannableString first=new android.text.SpannableString(automatic+"\n"+resolves);
+        first.setSpan(new android.text.style.RelativeSizeSpan(0.8f),automatic.length()+1,first.length(),0);
+        first.setSpan(new android.text.style.ForegroundColorSpan(0xff8e9097),automatic.length()+1,first.length(),0);
+        names[0]=first;
+        names[1]="Phone's own driver";
+        int checked=setting.equals("auto") ? 0 : current==null ? 1 : 0;
         for (int i=0;i<list.size();++i) {
-            names[i+1]=list.get(i).title();
-            if (current!=null && current.id.equals(list.get(i).id)) checked=i+1;
+            names[i+2]=list.get(i).title();
+            if (current!=null && current.id.equals(list.get(i).id)) checked=i+2;
         }
         int[] choice={checked};
         AlertDialog dialog=new AlertDialog.Builder(this).setTitle("GPU driver")
             .setSingleChoiceItems(names,checked,(d,which) -> {
                 choice[0]=which;
-                ((AlertDialog)d).getButton(AlertDialog.BUTTON_NEGATIVE).setEnabled(which>0);
+                ((AlertDialog)d).getButton(AlertDialog.BUTTON_NEGATIVE).setEnabled(which>1);
             })
-            .setPositiveButton("Use",(d,w) -> useDriver(choice[0]==0 ? null : list.get(choice[0]-1)))
+            .setPositiveButton("Use",(d,w) -> useDriver(choice[0]==0 ? AUTO : choice[0]==1 ? null : list.get(choice[0]-2)))
             .setNeutralButton("Add driver…",(d,w) -> askAddDriver())
-            .setNegativeButton("Delete",(d,w) -> { if (choice[0]>0) deleteDriver(list.get(choice[0]-1)); })
+            .setNegativeButton("Delete",(d,w) -> { if (choice[0]>1) deleteDriver(list.get(choice[0]-2)); })
             .create();
-        dialog.setOnShowListener(d -> dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setEnabled(choice[0]>0));
+        dialog.setOnShowListener(d -> dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setEnabled(choice[0]>1));
         dialog.setOnDismissListener(d -> immersive());
         dialog.show();
+    }
+    /** useDriver's argument for Automatic (null is the phone's own driver). */
+    private static final DriverManager.Driver AUTO=new DriverManager.Driver("auto","Automatic","","");
+    /** The effective gpu_driver setting: "auto", "system", or the id of an installed driver. An empty or missing
+     *  value, and an id whose folder is gone (such as a Linux driver the cleanup removed), are "auto". */
+    private String gpuSetting() {
+        String value=setting("gpu_driver");
+        if (value==null) return "auto";
+        value=value.trim();
+        if (value.equals("system")) return "system";
+        if (value.isEmpty() || value.equals("auto") || drivers.find(value)==null) return "auto";
+        return value;
+    }
+    /** The phone's GPU family; blocks the first time (kgsl-chip-id). Cached once the runtime can read it. */
+    private GpuFamily gpu() {
+        GpuFamily g=gpu;
+        if (g==null) {
+            g=GpuFamily.detect(BASE);
+            if (new File(BASE,"bionic/bin/kgsl-chip-id").exists()) gpu=g;
+        }
+        return g;
     }
     /** A driver comes from the app's GitHub releases or from a zip on the device. */
     private void askAddDriver() {
@@ -930,12 +981,9 @@ public final class MainActivity extends Activity {
         });
         driverDownload.show();
     }
-    /** The GPU family, from kgsl-chip-id's output (0x44... is Adreno 8xx): "gen8", "main", or null when the
-     *  GPU cannot be read. The download list marks the Turnip build for it. Blocks. */
-    private String gpuVariant() {
-        String id=LogReport.chipId(BASE);
-        return id==null ? null : id.startsWith("0x44") ? "gen8" : "main";
-    }
+    /** The GPU family (GpuFamily): "gen8", "main", "mali", or null when unknown. The download list marks the
+     *  builds for it. Blocks. */
+    private String gpuVariant() { return gpu().family; }
     private void askDriverZip() {
         new AlertDialog.Builder(this).setTitle("Install a GPU driver")
             .setMessage("Choose a zip with a Turnip (or other Vulkan driver) built for Android, as the adrenotools "
@@ -983,25 +1031,25 @@ public final class MainActivity extends Activity {
         },"Driver-install");
         install.setDaemon(true); install.start();
     }
-    /** Picks the driver for the next start (null: the system driver, "system") and offers the restart. */
+    /** Picks the driver for the next start (null: the phone's own driver, "system"; AUTO: "auto", the bundled driver
+     *  for this GPU) and offers the restart. */
     private void useDriver(DriverManager.Driver driver) {
-        String id=driver==null ? "system" : driver.id, before=setting("gpu_driver");
-        if (before==null || before.isEmpty()) before="system";
+        String id=driver==null ? "system" : driver.id, before=gpuSetting();
         if (id.equals(before)) return;
         if (!new SettingsDialog(this,new File(BASE,"bbport.ini"),this::restartGame).set("gpu_driver",id)) {
             toast("Could not save the GPU driver setting."); return;
         }
-        askRestart(driver==null ? "the system driver" : driver.title());
+        askRestart(driver==null ? "the phone's own driver" : driver==AUTO ? "the automatic driver ("+AutoDriver.describe(gpu,Build.VERSION.SDK_INT)+")" : driver.title());
     }
     private void deleteDriver(DriverManager.Driver driver) {
         new AlertDialog.Builder(this).setTitle("Delete "+driver.title()+"?")
             .setNegativeButton("Cancel",(d,w) -> showDrivers())
             .setPositiveButton("Delete",(d,w) -> {
-                boolean active=driver.id.equals(setting("gpu_driver"));
+                boolean active=driver.id.equals(gpuSetting());
                 if (active) new SettingsDialog(this,new File(BASE,"bbport.ini"),this::restartGame).set("gpu_driver","system");
                 try { drivers.delete(driver.id); }
                 catch (Exception ex) { toast("Could not delete the driver: "+ex.getMessage()); return; }
-                if (active) askRestart("the system driver"); else showDrivers();
+                if (active) askRestart("the phone's own driver"); else showDrivers();
             }).show();
     }
     private void toast(String message) { android.widget.Toast.makeText(this,message,android.widget.Toast.LENGTH_LONG).show(); }
@@ -1062,6 +1110,17 @@ public final class MainActivity extends Activity {
             for (String line:modsLog) android.util.Log.i("Bloodborne",line);
             java.util.List<String> extra=new java.util.ArrayList<>();
             if (app0!=null) extra.add("BB_APP0_DIR="+app0);
+            // Automatic GPU driver: the bundled one for this GPU (installed from the APK on first use) or the phone's own.
+            if (gpuSetting().equals("auto")) {
+                AutoDriver.Result auto=AutoDriver.resolve(this,drivers,gpu(),Build.VERSION.SDK_INT,
+                    message -> main.post(() -> { if (!destroyed) { status.setText(message); status.setVisibility(View.VISIBLE); } }));
+                autoLine=auto.line; modsLog.add(auto.line);
+                android.util.Log.i("Bloodborne",auto.line);
+                extra.add("BB_GPU_DRIVER="+(auto.id==null ? "system" : auto.id));
+                extra.add("BB_GPU_DRIVER_WHY="+auto.line);
+                if (auto.notice!=null && !autoNoticeShown) { autoNoticeShown=true; main.post(() -> { if (!destroyed) toast(auto.notice); }); }
+                main.post(() -> { if (!destroyed && drawerOpen) refreshDrawer(); });
+            } else autoLine=null;
             // The surface's size in pixels: the present target of libbbgpu (BB_SCREEN_W/H).
             int w=surface.getWidth(), h=surface.getHeight();
             extra.add("BB_SCREEN_W="+(w>0 ? w : 1280)); extra.add("BB_SCREEN_H="+(h>0 ? h : 720));

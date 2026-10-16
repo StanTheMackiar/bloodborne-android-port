@@ -70,7 +70,7 @@ final class LogReport {
         Result result=new Result();
         result.zip=new File(dir,PREFIX+stamp+".zip");
         int[] removed={0};
-        String chip=chipId(base.getPath());
+        GpuFamily chip=GpuFamily.detect(base.getPath());
         StringBuilder summary=new StringBuilder();
         try (ZipOutputStream zip=new ZipOutputStream(new java.io.BufferedOutputStream(Files.newOutputStream(result.zip.toPath())))) {
             zip.setLevel(6);
@@ -108,7 +108,7 @@ final class LogReport {
     }
 
     // ---- report.txt ----
-    private static String deviceLines(Activity a,Facts f,String chip) {
+    private static String deviceLines(Activity a,Facts f,GpuFamily chip) {
         StringBuilder s=new StringBuilder();
         try {
             PackageInfo p=a.getPackageManager().getPackageInfo(a.getPackageName(),0);
@@ -133,7 +133,7 @@ final class LogReport {
             line(s,"Display",metrics.widthPixels+"x"+metrics.heightPixels+" at "+String.format(Locale.ROOT,"%.1f",d.getRefreshRate())
                 +" Hz, supported "+String.join("/",sorted)+" Hz");
         } catch (Exception e) { line(s,"Display","unknown"); }
-        line(s,"GPU",chip==null ? "unknown" : chip);
+        line(s,"GPU",chip.describe());
         line(s,"GPU driver",f.driverLine);
         line(s,"Game folder",f.gameFolder==null ? "not chosen" : f.gameFolder+(f.ebootFound ? " (eboot.bin found)" : " (no eboot.bin)"));
         line(s,"Mods",f.modsLine);
