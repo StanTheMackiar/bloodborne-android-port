@@ -4,9 +4,13 @@
 # bb-probe (runtime executable), kgsl-chip-id, bb-prepare (game preparation) and ps4-pkg-tool (PKG
 # installs). Output: out/bionic/{bin,lib,licenses}; build_release_runtime.py packages them.
 # Prerequisite: tools/android/build_bionic_deps.sh (NDK + third-party libraries).
+# usage: build_bionic.sh [all|gpu]   gpu: libbbgpu.so alone into out/bionic/lib (a renderer change: the rest of
+#        the runtime is the same source as a release and can come from its runtime archive).
 # STL: c++_shared for all components (libbbcpu/libbbgpu/bb-probe share one libc++_shared.so; static
 # libc++ in several DSOs would give each its own exception/RTTI/new state).
 set -euo pipefail
+what=${1:-all}
+case $what in all|gpu) ;; *) echo "usage: $0 [all|gpu]" >&2; exit 2 ;; esac
 cd -- "$(dirname -- "$0")/../.."
 out=out/bionic
 root=$PWD/.local-deps/android
@@ -16,9 +20,13 @@ prefix=$root/bionic-prefix
 # Header-only packages (magic_enum, robin-map, VMA, Boost) from the host build's dependencies.
 headers=${BB_ARM64_HEADERS:-$PWD/.local-deps/root/usr}
 toolchain=$ndk/build/cmake/android.toolchain.cmake
-llvm=$ndk/toolchains/llvm/prebuilt/linux-x86_64
-J=${BB_JOBS:-22}
-run() { taskset -c 2-23 nice -n 19 "$@"; }
+# The NDK's prebuilt tools for this machine (linux-x86_64, or darwin-x86_64: universal, so Apple Silicon too).
+case $(uname -s) in Darwin) host_tag=darwin-x86_64 ;; *) host_tag=linux-x86_64 ;; esac
+cores=$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu)
+J=${BB_JOBS:-$cores}
+# Linux: two cores left free (the PC stays usable). macOS has no taskset.
+if command -v taskset >/dev/null; then run() { taskset -c "2-$((cores - 1))" nice -n 19 "$@"; }; else run() { nice -n 19 "$@"; }; fi
+llvm=$ndk/toolchains/llvm/prebuilt/$host_tag
 [[ -f $toolchain ]] || { echo "No NDK: $ndk (tools/android/build_bionic_deps.sh)" >&2; exit 1; }
 [[ -f $prefix/.done-ffmpeg ]] || { echo "No Bionic deps in $prefix (tools/android/build_bionic_deps.sh)" >&2; exit 1; }
 [[ -d $headers/share/cmake/magic_enum ]] || { echo "No header-only packages in $headers" >&2; exit 1; }
@@ -31,6 +39,7 @@ for patch in gpu/patches/fsr-vulkan/*.patch; do
     fi
 done
 
+if [[ $what == all ]]; then
 # FEX: no glibc jemalloc hook (glibc-only; it exists for thunks, which this build does not use).
 if [[ ! -f $out/fex/build.ninja ]]; then
     cmake -S third_party/FEX -B "$out/fex" -G Ninja "${ndk_cmake[@]}" \
@@ -40,6 +49,7 @@ if [[ ! -f $out/fex/build.ninja ]]; then
         -DENABLE_JEMALLOC_GLIBC_ALLOC=OFF >/dev/null
 fi
 run ninja -C "$out/fex" -j "$J" bbcpu > "$out/fex-build.log" 2>&1 || { grep -E "error|FAILED" "$out/fex-build.log" | head -40 >&2; exit 1; }
+fi
 
 # GPU library: no libvulkan (gpu/shim/vk_driver_loader.cpp dlopens the driver), no X11. glslang
 # (host program) compiles the host shaders.
@@ -58,6 +68,12 @@ if [[ ! -f $out/gpu/build.ninja ]]; then
         -Dboost_headers_DIR="$headers/lib/cmake/boost_headers-1.92.0" >/dev/null
 fi
 run ninja -C "$out/gpu" -j "$J" bbgpu > "$out/gpu-build.log" 2>&1 || { grep -v '^\[' "$out/gpu-build.log" | tail -40 >&2; exit 1; }
+
+if [[ $what == gpu ]]; then
+    mkdir -p "$out/lib" && cp -f "$out/gpu/libbbgpu.so" "$out/lib/"
+    echo "Built $out/lib/libbbgpu.so (Bionic, API $api)"
+    exit 0
+fi
 
 # bin/ and lib/ side by side, executables find lib/ through $ORIGIN.
 mkdir -p "$out/bin" "$out/lib"
