@@ -14,12 +14,15 @@
 // back, at most every 2 s, and counts how often that happened.
 #include "bbport_affinity.h"
 
+#include <pthread.h>
 #include <sched.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -111,9 +114,46 @@ std::mutex lock;
 std::vector<Pinned> pinned;
 unsigned resets = 0;
 
+// sched_setattr with a utilization clamp (Linux 5.3+): the scheduler places a thread whose
+// minimum utilization is high on the big cores and runs them faster for it. Unlike the affinity it
+// is the thread's own: HyperOS moving the app between cpusets (which resets every affinity within
+// 100 ms, seen on the Poco F7 Pro) leaves it. 1024 is the scale's maximum.
+struct SchedAttr {
+    std::uint32_t size;
+    std::uint32_t sched_policy;
+    std::uint64_t sched_flags;
+    std::int32_t sched_nice;
+    std::uint32_t sched_priority;
+    std::uint64_t sched_runtime, sched_deadline, sched_period;
+    std::uint32_t sched_util_min, sched_util_max;
+};
+// SCHED_FLAG_KEEP_POLICY, SCHED_FLAG_KEEP_PARAMS, SCHED_FLAG_UTIL_CLAMP_MIN (linux/sched.h).
+constexpr std::uint64_t KeepPolicy = 0x08, KeepParams = 0x10, UtilClampMin = 0x20;
+
+void ClampMin(pid_t tid, std::uint32_t util_min, const char* name) {
+    SchedAttr attr{};
+    attr.size = sizeof(attr);
+    attr.sched_flags = KeepPolicy | KeepParams | UtilClampMin;
+    attr.sched_util_min = util_min;
+#ifdef SYS_sched_setattr
+    if (syscall(SYS_sched_setattr, tid, &attr, 0) != 0) {
+        std::printf("Affinity: %s: utilization clamp %u refused (%s)\n", name, util_min,
+                    std::strerror(errno));
+    }
+#endif
+}
+
 void Pin(bool fast, const char* name) {
     if (!Enabled()) {
         return;
+    }
+    // BB_PIN_UCLAMP=N (0-1024): the main thread's minimum utilization (helpers: half of it).
+    static const std::uint32_t uclamp = [] {
+        const char* v = std::getenv("BB_PIN_UCLAMP");
+        return v ? std::uint32_t(std::min(1024, std::max(0, std::atoi(v)))) : 0u;
+    }();
+    if (uclamp) {
+        ClampMin(pid_t(syscall(SYS_gettid)), fast ? uclamp : uclamp / 2, name);
     }
     const Layout& l = Get();
     if (!l.usable) {
@@ -147,6 +187,15 @@ bool Helper(const char* name) {
 } // namespace
 
 void MainThread() {
+    // BB_MAIN_THREAD_NAME=name: the main thread's name (experiment). HyperOS put threads named
+    // GXRenderThread and "FMOD mixer thread" on the X4 by itself (affinity 7), and left the main
+    // thread, the one that limits the frame rate, on any core.
+    if (const char* name = std::getenv("BB_MAIN_THREAD_NAME"); name && *name) {
+        char host[16]{};
+        std::strncpy(host, name, sizeof(host) - 1);
+        pthread_setname_np(pthread_self(), host);
+        std::printf("Affinity: main thread named %s (BB_MAIN_THREAD_NAME)\n", host);
+    }
     Pin(true, "main thread");
 }
 
@@ -160,12 +209,18 @@ void Maintain() {
     if (!Enabled()) {
         return;
     }
+    // HyperOS reset the main thread's affinity within 100 ms on the Poco F7 Pro: BB_PIN_EVERY_FRAME=1
+    // puts it back on every frame instead of every 2 s (a few syscalls a frame).
+    static const bool every_frame = [] {
+        const char* v = std::getenv("BB_PIN_EVERY_FRAME");
+        return v && v[0] == '1';
+    }();
     static auto next = std::chrono::steady_clock::now();
     const auto now = std::chrono::steady_clock::now();
     if (now < next) {
         return;
     }
-    next = now + std::chrono::seconds(2);
+    next = now + (every_frame ? std::chrono::milliseconds(0) : std::chrono::milliseconds(2000));
     const Layout& l = Get();
     std::scoped_lock lk{lock};
     unsigned put_back = 0;
@@ -180,7 +235,14 @@ void Maintain() {
             ++put_back;
         }
     }
-    if (put_back) {
+    static auto last_report = now;
+    if (put_back && every_frame) {
+        resets += put_back;
+        if (now - last_report >= std::chrono::seconds(10)) {
+            last_report = now;
+            std::printf("Affinity: %u put back so far\n", resets);
+        }
+    } else if (put_back) {
         resets += put_back;
         std::printf("Affinity: %u threads had other cpus set by the system, put back (%u so far)\n",
                     put_back, resets);
