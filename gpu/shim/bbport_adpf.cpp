@@ -9,6 +9,7 @@
 // they wait for work, so their CPU time says nothing about the frame and is not measured (they are
 // in the session, which is what the hint's boost applies to).
 #include "bbport_adpf.h"
+#include "bbport_affinity.h"
 #include "core/emulator_settings.h"
 
 #include <dlfcn.h>
@@ -320,6 +321,7 @@ void StartThermal() {
 } // namespace
 
 void RegisterMainThread() {
+    BbAffinity::MainThread();
     Init();
     State& s = S();
     if (!s.enabled) {
@@ -341,6 +343,7 @@ void NoteThreadName(const char* name) {
     if (!name) {
         return;
     }
+    BbAffinity::ThreadNamed(name);
     // Cheap rejection before anything is loaded: only these names matter.
     const bool match = !std::strncmp(name, "shadPS4:GpuComm", 15) || !std::strcmp(name, "bb:DrawRec") ||
                        !std::strncmp(name, "bb:VkRecorder", 13) || !std::strncmp(name, "GXRender", 8);
@@ -377,6 +380,7 @@ void NoteThreadName(const char* name) {
 }
 
 void FrameSubmitted() {
+    BbAffinity::Maintain();
     State& s = S();
     if (!s.dlopen_done.load(std::memory_order_acquire) || !s.enabled || s.failed) {
         return;
