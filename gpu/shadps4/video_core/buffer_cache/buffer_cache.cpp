@@ -2250,17 +2250,23 @@ void BufferCache::ReturnIdleCopies(u32 now) {
 void BufferCache::CompactResidency(u32 now) {
     // Returned copies leave free slots spread over every chunk: 210 MiB of them in 11 chunks after
     // 15 minutes of Central Yharnam, none empty, so none went back to the driver. With over
-    // 128 MiB of free slots, every 10 s, the emptiest chunk the free slots of the others can take
-    // and without data only the GPU has gives back all its copies, idle or not: bound again, they
-    // are uploaded again into fuller chunks (AllocateResidency), and the empty chunk is freed
-    // (FreeEmptyResidencyChunks). Done in the first Maintain of a submission, when little is bound
-    // yet; copies bound by work already recorded in it stay (BoundThisTick).
+    // 128 MiB of free slots, every 10 s, the emptiest chunk the free slots of the others can take,
+    // whose copies all hold no data only the GPU has and were all last bound 2 s ago or more,
+    // gives them all back: bound again, they are uploaded again into fuller chunks
+    // (AllocateResidency), and the empty chunk is freed (FreeEmptyResidencyChunks).
+    // Not copies bound less than 2 s ago: the draw pipe binds a packet's buffers (BindResources,
+    // stage A) ahead of recording it (stage B), possibly in the submission before, so "not bound
+    // in this submission" did not mean "not about to be read". A Poco F7 Pro lost the device when
+    // an indirect dispatch read its arguments from a copy returned that way (the spare memory:
+    // 1043118191x1064429451x1046607728 groups).
+    constexpr u32 RecentSeconds = 2;
     if (free_slot_count * block_size < 128_MB || now - last_evacuation < 10) {
         return;
     }
     struct Count {
         u64 blocks = 0;
         bool gpu_data = false;
+        bool recent = false;
     };
     std::unordered_map<VkDeviceMemory, Count> counts;
     for (const auto& range : resident_ranges) {
@@ -2270,8 +2276,12 @@ void BufferCache::CompactResidency(u32 now) {
         }
         Count& count = counts[memory];
         count.blocks += range.end - range.start;
-        for (u64 block = range.start; block < range.end && !count.gpu_data; ++block) {
-            count.gpu_data = CopyHasGpuData(block);
+        for (u64 block = range.start;
+             block < range.end && !count.gpu_data && !count.recent; ++block) {
+            count.recent =
+                now - group_use[(block << block_shift) >> USE_GROUP_BITS] < RecentSeconds ||
+                BoundThisTick(block);
+            count.gpu_data = !count.recent && CopyHasGpuData(block);
         }
     }
     last_evacuation = now;
@@ -2279,7 +2289,7 @@ void BufferCache::CompactResidency(u32 now) {
     for (auto it = counts.begin(); it != counts.end(); ++it) {
         const auto chunk = residency_chunks.find(it->first);
         if (it->first == static_cast<VkDeviceMemory>(residency_memory) || it->second.gpu_data ||
-            it->second.blocks == 0 ||
+            it->second.recent || it->second.blocks == 0 ||
             it->second.blocks > free_slot_count - chunk->second.free_offsets.size()) {
             continue;
         }
@@ -2297,7 +2307,8 @@ void BufferCache::CompactResidency(u32 now) {
             continue;
         }
         for (u64 block = range.start; block < range.end; ++block) {
-            if (BoundThisTick(block)) {
+            if (now - group_use[(block << block_shift) >> USE_GROUP_BITS] < RecentSeconds ||
+                BoundThisTick(block)) {
                 ++left;
             } else {
                 blocks.push_back(block);
@@ -2308,7 +2319,7 @@ void BufferCache::CompactResidency(u32 now) {
     residency_chunks[emptiest->first].evacuated_second = now;
     BbStats::evacuations.fetch_add(1, std::memory_order_relaxed);
     std::printf("Guest memory: a VRAM chunk emptied for the driver: %llu copies returned "
-                "(%llu KiB), %llu bound in this submission stay, %llu chunks\n",
+                "(%llu KiB), %llu bound since stay, %llu chunks\n",
                 (unsigned long long)returned, (unsigned long long)((returned << block_shift) >> 10),
                 (unsigned long long)left, (unsigned long long)residency_chunks.size());
     std::fflush(stdout);
