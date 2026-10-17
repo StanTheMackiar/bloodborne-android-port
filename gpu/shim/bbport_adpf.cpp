@@ -417,7 +417,19 @@ void FrameSubmitted() {
         return;
     }
     work = std::min(work, interval);
-    s.api.report_actual(s.session, i64(work));
+    // bbport BB_ADPF_REPORT=frame: the whole frame interval instead. On a Poco F7 Pro (HyperOS)
+    // the main thread worked ~20 ms of 40-45 ms frames, waiting the rest (locks, write faults,
+    // other threads), so the hint reported ~20 ms against a 16.7 ms target and the governor ran
+    // every core at ~1.6 GHz of 2.9-3.3 within two minutes, without any thermal throttling.
+    static const bool report_frame = [] {
+        const char* v = std::getenv("BB_ADPF_REPORT");
+        const bool on = v && std::strcmp(v, "frame") == 0;
+        if (on) {
+            std::printf("ADPF: reporting the frame interval as the work (BB_ADPF_REPORT=frame)\n");
+        }
+        return on;
+    }();
+    s.api.report_actual(s.session, i64(report_frame ? interval : work));
 }
 } // namespace BbAdpf
 
