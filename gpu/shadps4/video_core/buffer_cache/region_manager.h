@@ -275,11 +275,40 @@ private:
     }
     // A short period re-protects thousands of pages at once and each faults again before it is
     // hot, a fault storm (a 2 s period gave ~20k faults/s and frame spikes).
-    static constexpr u8 HotFaults = 2;
     static constexpr auto HotPeriod = std::chrono::seconds(20);
+    // BB_HOT_FAULTS=N (2-255, default 2): the write faults within HotPeriod that make a page hot.
+    // At 2, ~14k pages of Hunter's Nightmare were hot; the pages that cost the most are written
+    // every frame (on a Poco F7 Pro one page took ~140 faults/s from one instruction), so a
+    // threshold of ~40 (two a second) keeps only those.
+    static u8 HotFaults() {
+        static const u8 faults = [] {
+            const char* env = std::getenv("BB_HOT_FAULTS");
+            const int n = env ? std::atoi(env) : 2;
+            return u8(std::clamp(n, 2, 255));
+        }();
+        return faults;
+    }
+    // BB_HOT_MAX_PAGES=N (default 1024, 4 MiB): at most this many hot pages in all; each is
+    // uploaded on every use, so the set must stay small.
+    static s64 HotMaxPages() {
+        static const s64 pages = [] {
+            const char* env = std::getenv("BB_HOT_MAX_PAGES");
+            return env ? s64(std::max(0, std::atoi(env))) : s64(1024);
+        }();
+        return pages;
+    }
 
     void CountWriteFaults(size_t start_page, size_t end_page) {
         const bool hot_enabled = HotPagesEnabled();
+        if (hot_enabled && num_hot == 0) {
+            // Faults per period, not since the start: with a high threshold every page would
+            // reach it in a long session. (With hot pages, KeepHotPagesModified starts over.)
+            const auto now = std::chrono::steady_clock::now();
+            if (now - counting_since > HotPeriod) {
+                write_faults.fill(0);
+                counting_since = now;
+            }
+        }
         for (size_t page = start_page; page < end_page; ++page) {
             if (writeable.Get(page)) {
                 continue; // not protected: no fault
@@ -288,11 +317,12 @@ private:
             if (!hot_enabled) {
                 continue;
             }
-            if (write_faults[page] < HotFaults) {
+            if (write_faults[page] < HotFaults()) {
                 ++write_faults[page];
                 continue;
             }
-            if (!hot.Get(page)) {
+            if (!hot.Get(page) &&
+                BbStats::hot_pages.load(std::memory_order_relaxed) < HotMaxPages()) {
                 if (num_hot == 0) {
                     hot_since = std::chrono::steady_clock::now();
                 }
@@ -313,6 +343,7 @@ private:
             BbStats::hot_pages.fetch_sub(num_hot, std::memory_order_relaxed);
             hot.Clear();
             write_faults.fill(0);
+            counting_since = std::chrono::steady_clock::now();
             num_hot = 0;
             return;
         }
@@ -323,6 +354,7 @@ private:
     RegionBits hot{};
     u32 num_hot = 0;
     std::chrono::steady_clock::time_point hot_since{};
+    std::chrono::steady_clock::time_point counting_since{}; ///< write_faults counted since
 
     PageManager* tracker;
     VAddr cpu_addr = 0;
